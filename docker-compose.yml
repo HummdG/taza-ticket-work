@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  whatsapp-bot:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - TRAVELPORT_APPLICATION_KEY=${TRAVELPORT_APPLICATION_KEY}
+      - TRAVELPORT_APPLICATION_SECRET=${TRAVELPORT_APPLICATION_SECRET}
+      - TRAVELPORT_USERNAME=${TRAVELPORT_USERNAME}
+      - TRAVELPORT_PASSWORD=${TRAVELPORT_PASSWORD}
+      - TRAVELPORT_ACCESS_GROUP=${TRAVELPORT_ACCESS_GROUP}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - WEBHOOK_VERIFY_TOKEN=${WEBHOOK_VERIFY_TOKEN}
+    restart: unless-stopped
+    volumes:
+      - ./.env:/app/.env:ro
