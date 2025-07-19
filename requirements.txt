@@ -7,4 +7,6 @@ langgraph>=0.0.55
 langchain-core>=0.1.45
 pydantic==2.5.0
 python-multipart==0.0.6
-twilio==8.10.0 
+twilio==8.10.0
+typing-extensions
+openai 

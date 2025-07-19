@@ -2,6 +2,10 @@
 Message handling service for processing all types of user requests with memory
 """
 
+import os
+import requests
+import tempfile
+from typing import Optional
 from langchain_core.messages import HumanMessage
 from ..models.schemas import FlightBookingState
 from ..agents.flight_booking_agent import flight_booking_agent
@@ -10,20 +14,67 @@ from ..services.conversation_router import should_handle_as_flight_booking, shou
 from ..services.memory_service import memory_manager
 from ..services.flight_info_collector import flight_collector
 
+# Import OpenAI for Whisper API
+try:
+    from openai import OpenAI
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+except ImportError:
+    print("⚠️ OpenAI library not installed. Voice messages will not work.")
+    client = None
 
-def process_user_message(user_message: str, user_id: str = "unknown") -> str:
+
+def process_user_message(user_message: str, user_id: str = "unknown", media_url: Optional[str] = None, media_content_type: Optional[str] = None) -> str:
     """
     Process any user message by routing to appropriate handler with memory
     
     Args:
-        user_message: The user's message
+        user_message: The user's message (could be empty for voice-only messages)
         user_id: Unique identifier for the user
+        media_url: URL to media content (for voice messages, images, etc.)
+        media_content_type: MIME type of the media
         
     Returns:
         str: Appropriate response based on message type
     """
     
     try:
+        # Handle voice messages first
+        if media_url and media_content_type and media_content_type.startswith('audio'):
+            print(f"🎤 Processing voice message from user: {user_id}")
+            
+            # Transcribe the voice message
+            transcribed_text = transcribe_voice_message(media_url, media_content_type)
+            
+            # Check if transcription failed
+            if transcribed_text.startswith("🎤 I"):
+                # Return error message directly
+                memory_manager.add_conversation(user_id, "[Voice Message]", transcribed_text, "voice_error")
+                return transcribed_text
+            
+            # Add emoji indicator for voice message and process transcribed text
+            voice_indicator = "🎤 "
+            response = process_transcribed_voice_message(transcribed_text, user_id, voice_indicator)
+            
+            # Save to memory with voice message indicator
+            memory_manager.add_conversation(user_id, f"🎤 [Voice]: {transcribed_text}", response, "voice")
+            return response
+        
+        # Handle other media types (images, documents, etc.)
+        elif media_url and media_content_type:
+            media_type = media_content_type.split('/')[0]
+            if media_type == 'image':
+                response = "🖼️ I can see you sent an image! While I can't analyze images yet, feel free to describe what you'd like help with regarding your travel plans."
+            elif media_type == 'video':
+                response = "🎬 I received your video! While I can't analyze videos yet, please let me know how I can help with your flight booking needs."
+            elif media_type == 'application':  # Documents, PDFs, etc.
+                response = "📄 I received your document! While I can't read documents yet, feel free to tell me what information you need help with for your travel."
+            else:
+                response = "📎 I received your file! While I can't process files yet, please let me know how I can assist you with flight booking."
+            
+            memory_manager.add_conversation(user_id, f"[{media_type.title()}]", response, "media")
+            return response
+        
+        # Handle regular text messages (existing logic)
         # Get conversation context from memory
         conversation_context = memory_manager.get_conversation_context(user_id)
         
@@ -36,7 +87,7 @@ def process_user_message(user_message: str, user_id: str = "unknown") -> str:
             message_type = "flight_collection"
         
         # Check if this is a complete flight booking request
-        elif should_handle_as_flight_booking(user_message):
+        elif should_handle_as_flight_booking(user_message, conversation_context):
             print(f"🛫 Routing to flight booking agent for user: {user_id}")
             response = process_flight_request(user_message, user_id, conversation_context)
             message_type = "flight"
@@ -260,4 +311,127 @@ def create_twiml_response(message: str) -> str:
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Message>{message}</Message>
-</Response>""" 
+</Response>"""
+
+
+def transcribe_voice_message(media_url: str, media_content_type: str) -> str:
+    """
+    Transcribe a voice message using OpenAI Whisper API
+    
+    Args:
+        media_url: URL to download the voice message
+        media_content_type: MIME type of the audio file
+        
+    Returns:
+        str: Transcribed text from the voice message
+    """
+    
+    if not client:
+        return "🎤 I received your voice message, but voice transcription is not available right now. Could you please type your message instead?"
+    
+    try:
+        print(f"🎤 Downloading voice message from: {media_url}")
+        
+        # Set up authentication for Twilio media URLs
+        auth = None
+        if "api.twilio.com" in media_url:
+            # Use Twilio credentials for authentication
+            twilio_account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+            twilio_auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+            
+            if not twilio_account_sid or not twilio_auth_token:
+                print("⚠️ Twilio credentials not found. Trying without authentication...")
+            else:
+                auth = (twilio_account_sid, twilio_auth_token)
+                print(f"🔐 Using Twilio authentication for media download")
+        
+        # Download the audio file with authentication if needed
+        response = requests.get(media_url, timeout=30, auth=auth)
+        response.raise_for_status()
+        
+        print(f"✅ Media file downloaded successfully ({len(response.content)} bytes)")
+        
+        # Determine file extension based on content type
+        extension = ".ogg"  # Default for WhatsApp voice messages
+        if "mp4" in media_content_type:
+            extension = ".mp4"
+        elif "mpeg" in media_content_type:
+            extension = ".mp3"
+        elif "wav" in media_content_type:
+            extension = ".wav"
+        
+        # Save to temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as temp_file:
+            temp_file.write(response.content)
+            temp_file_path = temp_file.name
+        
+        print(f"🎤 Transcribing voice message...")
+        
+        # Transcribe using OpenAI Whisper
+        with open(temp_file_path, "rb") as audio_file:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                response_format="text"
+            )
+        
+        # Clean up temporary file
+        os.unlink(temp_file_path)
+        
+        if transcript and transcript.strip():
+            print(f"✅ Voice message transcribed: {transcript}")
+            return transcript.strip()
+        else:
+            return "🎤 I couldn't understand your voice message. Could you please try again or type your message?"
+            
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error downloading voice message: {e}")
+        if "401" in str(e):
+            return "🎤 I had trouble accessing your voice message. Please check the Twilio authentication settings and try again."
+        return "🎤 I had trouble downloading your voice message. Could you please try sending it again?"
+        
+    except Exception as e:
+        print(f"❌ Error transcribing voice message: {e}")
+        return "🎤 I had trouble understanding your voice message. Could you please try again or type your message instead?"
+
+
+def process_transcribed_voice_message(transcribed_text: str, user_id: str, voice_indicator: str) -> str:
+    """
+    Process transcribed voice message text through the normal message handling flow
+    
+    Args:
+        transcribed_text: The transcribed text from voice message
+        user_id: Unique identifier for the user
+        voice_indicator: Emoji indicator for voice message
+        
+    Returns:
+        str: Response with voice message indicator
+    """
+    
+    # Get conversation context from memory
+    conversation_context = memory_manager.get_conversation_context(user_id)
+    
+    # Check if user is currently collecting flight information
+    is_collecting = memory_manager.is_collecting_flight_info(user_id)
+    
+    if is_collecting:
+        print(f"🔄 Continuing flight info collection for voice user: {user_id}")
+        response = handle_flight_info_collection(transcribed_text, user_id, conversation_context)
+    
+    # Check if this is a complete flight booking request
+    elif should_handle_as_flight_booking(transcribed_text, conversation_context):
+        print(f"🛫 Routing voice message to flight booking agent for user: {user_id}")
+        response = process_flight_request(transcribed_text, user_id, conversation_context)
+    
+    # Check if this is a partial flight request that needs more info
+    elif should_collect_flight_info(transcribed_text, conversation_context):
+        print(f"📝 Starting flight info collection from voice for user: {user_id}")
+        response = start_flight_info_collection(transcribed_text, user_id, conversation_context)
+    
+    # Default to general conversation
+    else:
+        print(f"💬 Routing voice message to general conversation agent for user: {user_id}")
+        response = handle_general_conversation(transcribed_text, user_id, conversation_context)
+    
+    # Add voice indicator to response
+    return f"{voice_indicator}{response}" 
