@@ -42,3 +42,5 @@ flight_results_raw_*.json
 # OS
 .DS_Store
 Thumbs.db 
+
+Test Notebooks/test.ipynb
