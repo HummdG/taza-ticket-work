@@ -286,7 +286,8 @@ def extract_flight_details(flight_offering: Dict, state: Optional[FlightBookingS
             departure_date = state.get("departure_date", "N/A")
             return_date_value = state.get("return_date")  # Can be None
             
-            details["departure_date"] = departure_date if departure_date is not None else "N/A"            
+            details["departure_date"] = departure_date
+            
             # Handle return_date to ensure it's always a string
             if return_date_value:
                 details["return_date"] = str(return_date_value)
