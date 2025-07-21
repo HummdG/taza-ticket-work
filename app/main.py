@@ -71,6 +71,13 @@ async def webhook_handler(request: Request):
         message_text = form_data.get("Body", "")
         sender = form_data.get("From", "")
         
+        # Extract media information for voice messages, images, etc.
+        media_url = str(form_data.get("MediaUrl0", "")) if form_data.get("MediaUrl0") else ""
+        media_content_type = str(form_data.get("MediaContentType0", "")) if form_data.get("MediaContentType0") else ""
+        num_media = str(form_data.get("NumMedia", "0"))
+        
+        print(f"📱 Media info - URL: {media_url}, Type: {media_content_type}, Count: {num_media}")
+        
         if not message_text:
             # Try JSON format (Meta WhatsApp Business API)
             try:
@@ -79,19 +86,43 @@ async def webhook_handler(request: Request):
                 if json_data and "messages" in json_data.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}):
                     messages = json_data["entry"][0]["changes"][0]["value"]["messages"]
                     if messages:
-                        message_text = messages[0].get("text", {}).get("body", "")
-                        sender = messages[0].get("from", "")
+                        message = messages[0]
+                        message_text = message.get("text", {}).get("body", "")
+                        sender = message.get("from", "")
+                        
+                        # Handle voice messages from Meta WhatsApp API
+                        if message.get("type") == "audio":
+                            audio_info = message.get("audio", {})
+                            media_url = f"https://graph.facebook.com/v18.0/{audio_info.get('id')}"  # Will need auth
+                            media_content_type = audio_info.get("mime_type", "audio/ogg")
+                        
+                        # Handle other media types from Meta WhatsApp API
+                        elif message.get("type") in ["image", "video", "document"]:
+                            media_info = message.get(message.get("type"), {})
+                            media_url = f"https://graph.facebook.com/v18.0/{media_info.get('id')}"  # Will need auth
+                            media_content_type = media_info.get("mime_type", "")
+                            
             except Exception as json_error:
                 print(f"⚠️ Could not parse JSON: {json_error}")
         
-        if message_text and sender:
+        if (message_text and sender) or (media_url and sender):
             # Use sender as user_id for memory management
             user_id = str(sender)
             
-            print(f"📱 Processing WhatsApp message from {user_id}: '{message_text}'")
+            if media_url and media_content_type:
+                print(f"📱 Processing WhatsApp media message from {user_id}: Type: {media_content_type}")
+                if media_content_type.startswith('audio'):
+                    print(f"🎤 Voice message detected from {user_id}")
+            else:
+                print(f"📱 Processing WhatsApp text message from {user_id}: '{message_text}'")
             
-            # Process the user message using the message handler with memory
-            bot_response = process_user_message(str(message_text), user_id)
+            # Process the user message using the message handler with memory and media support
+            bot_response = process_user_message(
+                str(message_text), 
+                user_id, 
+                media_url=media_url if media_url else None,
+                media_content_type=media_content_type if media_content_type else None
+            )
             
             print(f"🤖 Generated response: '{bot_response}'")
             
@@ -113,7 +144,12 @@ async def webhook_handler(request: Request):
 async def test_endpoint(message: TestMessage):
     """Test endpoint for manual testing"""
     user_id = message.user_id or "test_user"
-    response = process_user_message(message.message, user_id)
+    response = process_user_message(
+        message.message, 
+        user_id,
+        media_url=None,  # Could be extended to test media
+        media_content_type=None
+    )
     return {"response": response, "user_id": user_id}
 
 
@@ -199,6 +235,25 @@ async def test_send_message():
         
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.post("/test-voice")
+async def test_voice_endpoint(message: dict):
+    """Test endpoint for voice message testing"""
+    user_id = message.get("user_id", "test_user")
+    media_url = message.get("media_url")
+    media_content_type = message.get("media_content_type", "audio/ogg")
+    
+    if not media_url:
+        return {"error": "media_url is required for voice message testing"}
+    
+    response = process_user_message(
+        "", 
+        user_id,
+        media_url=media_url,
+        media_content_type=media_content_type
+    )
+    return {"response": response, "user_id": user_id, "transcription_attempted": True}
 
 
 if __name__ == "__main__":

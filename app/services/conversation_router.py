@@ -55,18 +55,37 @@ def classify_message_intent(user_message: str) -> str:
     return "general_chat"
 
 
-def should_handle_as_flight_booking(user_message: str) -> bool:
+def should_handle_as_flight_booking(user_message: str, conversation_context: str = "") -> bool:
     """
     Determine if a message should be handled by the flight booking agent
     
     Args:
         user_message: The user's input message
+        conversation_context: Previous conversation context
         
     Returns:
         bool: True if flight booking, False for general chat
     """
+    
+    # First try English keyword-based classification
     intent = classify_message_intent(user_message)
-    return intent == "flight_booking"
+    if intent == "flight_booking":
+        return True
+    
+    # If English keywords didn't match, check using LLM-powered extraction
+    # This handles non-English languages like Urdu, Hindi, Arabic, etc.
+    try:
+        extracted_info = flight_collector.extract_flight_info(user_message, conversation_context)
+        has_flight_intent = extracted_info.get("flight_intent", False)
+        
+        if has_flight_intent:
+            print(f"✅ Detected flight intent via LLM extraction: {user_message}")
+            return True
+            
+    except Exception as e:
+        print(f"⚠️ Error in LLM flight intent detection: {e}")
+    
+    return False
 
 
 def analyze_flight_request_completeness(user_message: str, conversation_context: str = "") -> Tuple[bool, bool, Dict]:
@@ -118,7 +137,11 @@ def should_collect_flight_info(user_message: str, conversation_context: str = ""
     if message_lower in ["how are you", "how are you?", "what's up", "what's up?", "how's it going", "how's it going?"]:
         return False
     
-    has_intent, is_complete, _ = analyze_flight_request_completeness(user_message, conversation_context)
+    # Check if this should be handled as a complete flight booking request first
+    if should_handle_as_flight_booking(user_message, conversation_context):
+        # Now check if the request is complete or needs more info
+        has_intent, is_complete, _ = analyze_flight_request_completeness(user_message, conversation_context)
+        # Only collect info if there's intent but request is incomplete
+        return has_intent and not is_complete
     
-    # Collect info if there's flight intent but request is incomplete
-    return has_intent and not is_complete 
+    return False 
