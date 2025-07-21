@@ -1,5 +1,5 @@
 """
-Enhanced flight booking agent with bulk date range searching
+Enhanced flight booking agent with bulk date range searching - FIXED VERSION
 """
 
 import json
@@ -8,20 +8,30 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
+import os
 
 # LangGraph and LangChain imports
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 # Local imports
 from ..models.schemas import FlightBookingState
 from ..api.travelport import get_api_headers, CATALOG_URL
 from ..payloads.flight_search import build_flight_search_payload
+from dotenv import load_dotenv
+load_dotenv()
 
 
 # Initialize LLM
-llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+
+# llm = ChatGoogleGenerativeAI(
+#     model="gemini-2.5-flash",
+#     temperature=0
+# )
+
+llm = ChatOpenAI(model = "gpt-3.5-turbo", temperature = 0)
 
 
 def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
@@ -178,18 +188,26 @@ def search_flights_bulk(state: FlightBookingState) -> FlightBookingState:
     """Search flights across a date range and find the globally cheapest option"""
     
     try:
+        # FIX: Check for None values before calling generate_date_range
+        start_date = state.get("date_range_start")
+        end_date = state.get("date_range_end")
+        
+        if not start_date or not end_date:
+            state["response_text"] = "Missing date range information for bulk search."
+            return state
+        
         # Generate dates to search
         dates_to_search = generate_date_range(
-            state["date_range_start"], 
-            state["date_range_end"],
+            start_date, 
+            end_date,
             max_searches=15  # Limit to avoid API overload
         )
         
         print(f"🗓️ Searching {len(dates_to_search)} dates: {dates_to_search}")
         
         # Prepare search parameters
-        from_city = str(state["from_city"])
-        to_city = str(state["to_city"])
+        from_city = str(state["from_city"]) if state.get("from_city") else ""
+        to_city = str(state["to_city"]) if state.get("to_city") else ""
         return_date = state.get("return_date")
         passengers = state.get("passengers", 1)
         passenger_age = state.get("passenger_age", 25)
@@ -215,7 +233,7 @@ def search_flights_bulk(state: FlightBookingState) -> FlightBookingState:
                 continue
         
         if not search_results:
-            state["response_text"] = f"😔 No flights found in the date range {state['date_range_start']} to {state['date_range_end']}."
+            state["response_text"] = f"😔 No flights found in the date range {start_date} to {end_date}."
             return state
         
         # Store all results for analysis
@@ -235,11 +253,20 @@ def search_flights_original(state: FlightBookingState) -> FlightBookingState:
     """Original single-date search function"""
     
     try:
+        # FIX: Add None checks for state values
+        from_city = state.get("from_city")
+        to_city = state.get("to_city") 
+        departure_date = state.get("departure_date")
+        
+        if not from_city or not to_city or not departure_date:
+            state["response_text"] = "Missing required information for flight search."
+            return state
+        
         # Build API payload
         payload = build_flight_search_payload(
-            from_city=str(state["from_city"]),
-            to_city=str(state["to_city"]),
-            departure_date=str(state["departure_date"]),
+            from_city=str(from_city),
+            to_city=str(to_city),
+            departure_date=str(departure_date),
             return_date=state.get("return_date"),
             passengers=state.get("passengers", 1),
             passenger_age=state.get("passenger_age", 25)
@@ -298,9 +325,10 @@ def search_flights(state: FlightBookingState) -> FlightBookingState:
 def analyze_bulk_search_results(state: FlightBookingState) -> FlightBookingState:
     """Analyze bulk search results to find the globally cheapest flight"""
     
-    bulk_results = state.get("bulk_search_results", {})
+    # FIX: Add proper None check and use .get() method
+    bulk_results = state.get("bulk_search_results")
     
-    if not bulk_results:
+    if not bulk_results or not isinstance(bulk_results, dict):
         state["response_text"] = "No bulk search results to analyze."
         return state
     
@@ -313,8 +341,18 @@ def analyze_bulk_search_results(state: FlightBookingState) -> FlightBookingState
         for search_date, api_response in bulk_results.items():
             print(f"🔍 Analyzing results for {search_date}")
             
+            # FIX: Add comprehensive None checks
+            if not api_response or not isinstance(api_response, dict):
+                continue
+                
             response_data = api_response.get("CatalogProductOfferingsResponse", {})
+            if not response_data or not isinstance(response_data, dict):
+                continue
+                
             catalog_offerings = response_data.get("CatalogProductOfferings", {})
+            if not catalog_offerings or not isinstance(catalog_offerings, dict):
+                continue
+                
             offerings = catalog_offerings.get("CatalogProductOffering", [])
             
             if not offerings:
@@ -323,14 +361,28 @@ def analyze_bulk_search_results(state: FlightBookingState) -> FlightBookingState
             # Find cheapest flight for this date
             for offering in offerings:
                 try:
+                    # FIX: Add None check for offering
+                    if not offering or not isinstance(offering, dict):
+                        continue
+                        
                     product_brand_options = offering.get("ProductBrandOptions", [])
                     if not product_brand_options:
                         continue
                     
                     for option in product_brand_options:
+                        # FIX: Add None check for option
+                        if not option or not isinstance(option, dict):
+                            continue
+                            
                         product_brand_offerings = option.get("ProductBrandOffering", [])
+                        if not product_brand_offerings:
+                            continue
                         
                         for brand_offering in product_brand_offerings:
+                            # FIX: Add None check for brand_offering
+                            if not brand_offering or not isinstance(brand_offering, dict):
+                                continue
+                                
                             best_price = brand_offering.get("BestCombinablePrice", {})
                             if isinstance(best_price, dict):
                                 price = best_price.get("TotalPrice", 0)
@@ -391,7 +443,7 @@ def find_cheapest_flight_original(state: FlightBookingState) -> FlightBookingSta
     try:
         api_response = state["raw_api_response"]
         response_data = api_response.get("CatalogProductOfferingsResponse", {})
-        catalog_offerings = response_data.get("CatalogProductOfferings", {})
+        catalog_offerings = response_data.get("CatalogProductOfferings", {}) 
         offerings = catalog_offerings.get("CatalogProductOffering", [])
         
         if not offerings:

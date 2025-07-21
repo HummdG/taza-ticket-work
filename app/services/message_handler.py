@@ -244,20 +244,27 @@ def process_flight_request(user_message: str, user_id: str = "unknown", conversa
     try:
         # Initialize state with memory context
         initial_state: FlightBookingState = {
-            "messages": [HumanMessage(content=user_message)],
-            "user_message": user_message,
-            "user_id": user_id,
-            "from_city": None,
-            "to_city": None,
-            "departure_date": None,
-            "return_date": None,
-            "passengers": 1,
-            "passenger_age": 25,
-            "raw_api_response": None,
-            "cheapest_flight": None,
-            "response_text": "",
-            "conversation_context": conversation_context
-        }
+        "messages": [HumanMessage(content=user_message)],
+        "user_message": user_message,
+        "user_id": user_id,
+        "from_city": None,
+        "to_city": None,
+        "departure_date": None,
+        "return_date": None,
+        "passengers": 1,
+        "passenger_age": 25,
+        "raw_api_response": None,
+        "cheapest_flight": None,
+        "response_text": "",
+        "conversation_context": conversation_context,
+        "search_type": None,
+        "date_range_start": None,
+        "date_range_end": None,
+        "range_description": None,
+        "bulk_search_results": None,
+        "search_dates": None,
+        "best_departure_date": None,
+    }
         
         # Run the agent
         final_state = flight_booking_agent.invoke(initial_state)
