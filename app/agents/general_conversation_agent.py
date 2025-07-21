@@ -3,11 +3,18 @@ General conversation agent for handling non-flight related queries
 """
 
 import re
+import os
 from langchain_core.messages import HumanMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 # Initialize LLM for general conversation
-llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.7)
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash",
+    temperature=0.7
+)
+
+# llm = ChatOpenAI(model = "gpt-3.5-turbo", temperature = 0)
 
 
 def handle_general_conversation(user_message: str, user_id: str = "unknown", conversation_context: str = "") -> str:
