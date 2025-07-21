@@ -1,11 +1,13 @@
 """
-LangGraph flight booking agent and workflow management
+Enhanced flight booking agent with bulk date range searching
 """
 
 import json
 import requests
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 # LangGraph and LangChain imports
 from langgraph.graph import StateGraph, END
@@ -23,7 +25,7 @@ llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
 
 
 def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
-    """Parse user message to extract travel details using LLM with conversation context"""
+    """Enhanced parsing to detect date ranges vs specific dates"""
     
     today = datetime.now().strftime("%Y-%m-%d")
     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -36,41 +38,51 @@ def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
     parsing_prompt = f"""
     Today's date is {today}. Extract flight booking details from this user message: "{state['user_message']}"
     {context_section}
+    
+    Determine if the user is asking for:
+    1. A specific date search
+    2. A date range search (e.g., "cheapest in September", "best price next week")
+    
     Return ONLY a JSON object with these fields:
     {{
         "from_city": "3-letter airport code or null",
         "to_city": "3-letter airport code or null", 
-        "departure_date": "YYYY-MM-DD format or null",
+        "departure_date": "YYYY-MM-DD format or null (for specific date)",
         "return_date": "YYYY-MM-DD format or null",
         "passengers": "number of passengers (default 1)",
-        "passenger_age": "age of passenger (default 25)"
+        "passenger_age": "age of passenger (default 25)",
+        "search_type": "specific or range",
+        "date_range_start": "YYYY-MM-DD format or null (start of range)",
+        "date_range_end": "YYYY-MM-DD format or null (end of range)",
+        "range_description": "text description of the range or null"
     }}
     
     Rules:
     - Today is {today}
-    - Use standard 3-letter IATA airport codes (e.g., LHE for Lahore, ATH for Athens)
-    - Parse relative dates: "tomorrow" = {tomorrow}, "next week" = 7 days from today
-    - If return_date is not mentioned but it seems like a round trip, set it to 7 days after departure
-    - If information is missing, use null
-    - ALWAYS use dates in the future, never past dates
-    - Use conversation context to fill in missing details (e.g., if user previously mentioned a city)
+    - Use standard 3-letter IATA airport codes
+    - For phrases like "cheapest in September", "best price next week", "cheapest in the next month":
+      - Set search_type to "range"
+      - Set date_range_start and date_range_end appropriately
+      - Set departure_date to null
+    - For specific dates like "tomorrow", "August 15th":
+      - Set search_type to "specific"
+      - Set departure_date to the specific date
+      - Set date_range_start and date_range_end to null
+    - September 2025 = 2025-09-01 to 2025-09-30
+    - Next week = 7 days starting from tomorrow
+    - Next month = 30 days starting from today
     
-    Example: "I want to fly from Lahore to Athens tomorrow"
-    Output: {{"from_city": "LHE", "to_city": "ATH", "departure_date": "{tomorrow}", "return_date": null, "passengers": 1, "passenger_age": 25}}
+    Examples:
+    "Cheapest price from NYC to LAX in September" → search_type: "range", date_range_start: "2025-09-01", date_range_end: "2025-09-30"
+    "Flight from NYC to LAX tomorrow" → search_type: "specific", departure_date: "{tomorrow}"
     """
     
     try:
-        print(f"🤖 Calling LLM with message: {state['user_message']}")
+        print(f"🤖 Enhanced parsing for: {state['user_message']}")
         response = llm.invoke([HumanMessage(content=parsing_prompt)])
         content = response.content if isinstance(response.content, str) else str(response.content)
-        print(f"🔤 LLM Raw Response: '{content}'")
         
-        if not content or content.strip() == "":
-            print("❌ LLM returned empty response")
-            state["response_text"] = "😅 I couldn't understand your flight request. Please provide details like: from city, to city, and travel dates."
-            return state
-        
-        # Try to clean the content if it has extra text
+        # Clean the response
         content = content.strip()
         if content.startswith("```json"):
             content = content[7:]
@@ -87,33 +99,143 @@ def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
             "departure_date": parsed_data.get("departure_date"),
             "return_date": parsed_data.get("return_date"),
             "passengers": parsed_data.get("passengers", 1),
-            "passenger_age": parsed_data.get("passenger_age", 25)
+            "passenger_age": parsed_data.get("passenger_age", 25),
+            "search_type": parsed_data.get("search_type", "specific"),
+            "date_range_start": parsed_data.get("date_range_start"),
+            "date_range_end": parsed_data.get("date_range_end"),
+            "range_description": parsed_data.get("range_description")
         })
         
-        print(f"✅ Parsed travel details: {parsed_data}")
+        print(f"✅ Enhanced parsing result: {parsed_data}")
         
-    except json.JSONDecodeError as e:
-        print(f"❌ JSON Parse Error: {e}")
-        print(f"📝 Failed to parse content: '{content}'")
-        state["response_text"] = "😅 I couldn't understand your flight request. Please provide details like: from city, to city, and travel dates."
     except Exception as e:
-        print(f"❌ Error parsing message: {e}")
+        print(f"❌ Enhanced parsing error: {e}")
         state["response_text"] = "😅 I couldn't understand your flight request. Please provide details like: from city, to city, and travel dates."
     
     return state
 
 
-def search_flights(state: FlightBookingState) -> FlightBookingState:
-    """Search for flights using Travelport API"""
+def generate_date_range(start_date: str, end_date: str, max_searches: int = 15) -> List[str]:
+    """Generate a list of dates to search within the given range"""
     
-    # Check if we have required information
-    if not state.get("from_city") or not state.get("to_city") or not state.get("departure_date"):
-        state["response_text"] = "I need more information. Please specify: departure city, destination city, and travel date."
-        return state
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    
+    total_days = (end - start).days + 1
+    
+    if total_days <= max_searches:
+        # Search every day if range is small enough
+        dates = []
+        current = start
+        while current <= end:
+            dates.append(current.strftime("%Y-%m-%d"))
+            current += timedelta(days=1)
+        return dates
+    else:
+        # Sample dates across the range if it's too large
+        step = total_days // max_searches
+        dates = []
+        for i in range(0, total_days, step):
+            current = start + timedelta(days=i)
+            if current <= end:
+                dates.append(current.strftime("%Y-%m-%d"))
+        
+        # Always include the last date
+        if dates[-1] != end_date:
+            dates.append(end_date)
+        
+        return dates[:max_searches]
+
+
+def search_single_date(from_city: str, to_city: str, departure_date: str, 
+                      return_date: Optional[str], passengers: int, passenger_age: int) -> Tuple[str, Optional[Dict]]:
+    """Search flights for a single date"""
     
     try:
-        # Build API payload using the payload module
-        # Type assertion since we've already checked these values are not None
+        # Build API payload
+        payload = build_flight_search_payload(
+            from_city=from_city,
+            to_city=to_city,
+            departure_date=departure_date,
+            return_date=return_date,
+            passengers=passengers,
+            passenger_age=passenger_age
+        )
+        
+        # Make API call
+        headers = get_api_headers()
+        response = requests.post(CATALOG_URL, headers=headers, json=payload)
+        response.raise_for_status()
+        
+        return departure_date, response.json()
+        
+    except Exception as e:
+        print(f"❌ Error searching date {departure_date}: {e}")
+        return departure_date, None
+
+
+def search_flights_bulk(state: FlightBookingState) -> FlightBookingState:
+    """Search flights across a date range and find the globally cheapest option"""
+    
+    try:
+        # Generate dates to search
+        dates_to_search = generate_date_range(
+            state["date_range_start"], 
+            state["date_range_end"],
+            max_searches=15  # Limit to avoid API overload
+        )
+        
+        print(f"🗓️ Searching {len(dates_to_search)} dates: {dates_to_search}")
+        
+        # Prepare search parameters
+        from_city = str(state["from_city"])
+        to_city = str(state["to_city"])
+        return_date = state.get("return_date")
+        passengers = state.get("passengers", 1)
+        passenger_age = state.get("passenger_age", 25)
+        
+        # Use ThreadPoolExecutor for concurrent searches (be careful with rate limits)
+        search_results = {}
+        
+        # Sequential search to avoid overwhelming the API
+        for date in dates_to_search:
+            print(f"🔍 Searching {date}...")
+            try:
+                search_date, result = search_single_date(
+                    from_city, to_city, date, return_date, passengers, passenger_age
+                )
+                if result:
+                    search_results[search_date] = result
+                
+                # Add small delay to respect rate limits
+                time.sleep(0.5)
+                
+            except Exception as e:
+                print(f"⚠️ Failed to search {date}: {e}")
+                continue
+        
+        if not search_results:
+            state["response_text"] = f"😔 No flights found in the date range {state['date_range_start']} to {state['date_range_end']}."
+            return state
+        
+        # Store all results for analysis
+        state["bulk_search_results"] = search_results
+        state["search_dates"] = dates_to_search
+        
+        print(f"✅ Bulk search completed. Found results for {len(search_results)} dates")
+        
+    except Exception as e:
+        print(f"❌ Bulk search error: {e}")
+        state["response_text"] = f"😔 Error during bulk search: {str(e)}"
+    
+    return state
+
+
+def search_flights_original(state: FlightBookingState) -> FlightBookingState:
+    """Original single-date search function"""
+    
+    try:
+        # Build API payload
         payload = build_flight_search_payload(
             from_city=str(state["from_city"]),
             to_city=str(state["to_city"]),
@@ -131,29 +253,136 @@ def search_flights(state: FlightBookingState) -> FlightBookingState:
         api_result = response.json()
         state["raw_api_response"] = api_result
         
-        # Debug: Print the API response structure
-        print(f"🔍 API Response keys: {api_result.keys() if isinstance(api_result, dict) else 'Not a dict'}")
-        if isinstance(api_result, dict) and 'CatalogProductOfferingsResponse' in api_result:
-            catalog_response = api_result['CatalogProductOfferingsResponse']
-            print(f"🔍 Catalog Response keys: {catalog_response.keys() if isinstance(catalog_response, dict) else 'Not a dict'}")
-            if isinstance(catalog_response, dict) and 'CatalogProductOfferings' in catalog_response:
-                offerings = catalog_response['CatalogProductOfferings']
-                print(f"🔍 Offerings type: {type(offerings)}")
-                if isinstance(offerings, list) and offerings:
-                    print(f"🔍 First offering type: {type(offerings[0])}")
-                    print(f"🔍 First offering sample: {str(offerings[0])[:200]}...")
-        
-        print(f"✅ Flight search completed. Found {len(api_result.get('CatalogProductOfferingsResponse', {}).get('CatalogProductOfferings', []))} options")
+        print(f"✅ Single date search completed")
         
     except Exception as e:
-        print(f"❌ Flight search error: {e}")
-        state["response_text"] = f"😔 Sorry, I couldn't search for flights at the moment. Error: {str(e)}"
+        print(f"❌ Single date search error: {e}")
+        state["response_text"] = f"😔 Sorry, I couldn't search for flights. Error: {str(e)}"
     
     return state
 
 
-def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
-    """Analyze API response to find cheapest flight and extract details"""
+def search_flights(state: FlightBookingState) -> FlightBookingState:
+    """Enhanced flight search supporting both specific dates and date ranges"""
+    
+    # Check if we have required information
+    if not state.get("from_city") or not state.get("to_city"):
+        state["response_text"] = "I need more information. Please specify: departure city and destination city."
+        return state
+    
+    search_type = state.get("search_type", "specific")
+    
+    if search_type == "specific":
+        # Original single date search
+        if not state.get("departure_date"):
+            state["response_text"] = "I need a departure date for your flight search."
+            return state
+        
+        print(f"🔍 Searching specific date: {state['departure_date']}")
+        return search_flights_original(state)
+    
+    elif search_type == "range":
+        # New bulk date range search
+        if not state.get("date_range_start") or not state.get("date_range_end"):
+            state["response_text"] = "I need a valid date range for your search."
+            return state
+        
+        print(f"🔍 Searching date range: {state['date_range_start']} to {state['date_range_end']}")
+        return search_flights_bulk(state)
+    
+    else:
+        state["response_text"] = "Invalid search type specified."
+        return state
+
+
+def analyze_bulk_search_results(state: FlightBookingState) -> FlightBookingState:
+    """Analyze bulk search results to find the globally cheapest flight"""
+    
+    bulk_results = state.get("bulk_search_results", {})
+    
+    if not bulk_results:
+        state["response_text"] = "No bulk search results to analyze."
+        return state
+    
+    try:
+        global_cheapest_flight = None
+        global_lowest_price = float('inf')
+        best_date = None
+        
+        # Analyze each date's results
+        for search_date, api_response in bulk_results.items():
+            print(f"🔍 Analyzing results for {search_date}")
+            
+            response_data = api_response.get("CatalogProductOfferingsResponse", {})
+            catalog_offerings = response_data.get("CatalogProductOfferings", {})
+            offerings = catalog_offerings.get("CatalogProductOffering", [])
+            
+            if not offerings:
+                continue
+            
+            # Find cheapest flight for this date
+            for offering in offerings:
+                try:
+                    product_brand_options = offering.get("ProductBrandOptions", [])
+                    if not product_brand_options:
+                        continue
+                    
+                    for option in product_brand_options:
+                        product_brand_offerings = option.get("ProductBrandOffering", [])
+                        
+                        for brand_offering in product_brand_offerings:
+                            best_price = brand_offering.get("BestCombinablePrice", {})
+                            if isinstance(best_price, dict):
+                                price = best_price.get("TotalPrice", 0)
+                                if price and float(price) < global_lowest_price:
+                                    global_lowest_price = float(price)
+                                    global_cheapest_flight = offering
+                                    best_date = search_date
+                
+                except Exception as e:
+                    print(f"⚠️ Error analyzing offering for {search_date}: {e}")
+                    continue
+        
+        if global_cheapest_flight and best_date:
+            # Store the best results
+            state["cheapest_flight"] = global_cheapest_flight
+            state["best_departure_date"] = best_date
+            state["raw_api_response"] = bulk_results[best_date]  # Set this for compatibility
+            
+            # Extract flight details
+            flight_details = extract_flight_details(global_cheapest_flight, state, best_date)
+            
+            range_desc = state.get("range_description", f"{state.get('date_range_start')} to {state.get('date_range_end')}")
+            
+            response = f"""✈️ CHEAPEST FLIGHT FOUND! ✈️
+🗓️ Best date in {range_desc}: {best_date}
+
+💰 Price: {flight_details['currency']} {flight_details['price']}
+🛫 Departure: {flight_details['departure_time']}
+🛬 Arrival: {flight_details['arrival_time']}
+🏢 Airline: {flight_details['airline']}
+🔄 Stops: {flight_details['stops']}
+🧳 Baggage: {flight_details['baggage']}
+
+📊 Searched {len(bulk_results)} dates to find you the best price!
+
+❓ Would you like me to search for more options or help you with booking?"""
+            
+            state["response_text"] = response
+            
+            print(f"✅ Found global cheapest flight: ${global_lowest_price} on {best_date}")
+        else:
+            state["response_text"] = "✈️ I found flights but couldn't determine the best pricing across the date range."
+    
+    except Exception as e:
+        print(f"❌ Error analyzing bulk results: {e}")
+        state["response_text"] = "😔 Error analyzing search results across the date range."
+    
+    return state
+
+
+def find_cheapest_flight_original(state: FlightBookingState) -> FlightBookingState:
+    """Original single-date analysis function"""
     
     if not state.get("raw_api_response"):
         state["response_text"] = "No flight data available to analyze."
@@ -161,9 +390,9 @@ def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
     
     try:
         api_response = state["raw_api_response"]
-        response_data = api_response.get("CatalogProductOfferingsResponse", {}) if api_response else {}
-        catalog_offerings = response_data.get("CatalogProductOfferings", {}) if isinstance(response_data, dict) else {}
-        offerings = catalog_offerings.get("CatalogProductOffering", []) if isinstance(catalog_offerings, dict) else []
+        response_data = api_response.get("CatalogProductOfferingsResponse", {})
+        catalog_offerings = response_data.get("CatalogProductOfferings", {})
+        offerings = catalog_offerings.get("CatalogProductOffering", [])
         
         if not offerings:
             state["response_text"] = "No flights found for your search criteria."
@@ -172,24 +401,12 @@ def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
         cheapest_flight = None
         lowest_price = float('inf')
         
-        # Find the cheapest flight
+        # Find the cheapest flight (same logic as original)
         for offering in offerings:
             try:
-                print(f"🔍 Analyzing offering: {type(offering)}")
-                
-                # Ensure offering is a dictionary
-                if not isinstance(offering, dict):
-                    print(f"⚠️ Offering is not a dict: {offering}")
-                    continue
-                
-                # Extract price information from all options to find cheapest
                 product_brand_options = offering.get("ProductBrandOptions", [])
                 if not product_brand_options:
-                    print(f"⚠️ No ProductBrandOptions found")
                     continue
-                
-                option_lowest_price = float('inf')
-                best_option = None
                 
                 for option in product_brand_options:
                     product_brand_offerings = option.get("ProductBrandOffering", [])
@@ -198,125 +415,100 @@ def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
                         best_price = brand_offering.get("BestCombinablePrice", {})
                         if isinstance(best_price, dict):
                             price = best_price.get("TotalPrice", 0)
-                            if price and float(price) < option_lowest_price:
-                                option_lowest_price = float(price)
-                                best_option = brand_offering
-                
-                if not best_option:
-                    print(f"⚠️ No valid price found in any ProductBrandOffering")
-                    continue
-                
-                best_price = best_option.get("BestCombinablePrice", {})
-                total_price = best_price.get("TotalPrice", 0)
-                currency_info = best_price.get("CurrencyCode", {})
-                currency = currency_info.get("value", "EUR") if isinstance(currency_info, dict) else "EUR"
-                
-                print(f"💰 Found best price for this offering: {total_price} {currency}")
-                total_price = float(total_price) if total_price else 0
-                
-                if total_price > 0 and total_price < lowest_price:
-                    lowest_price = total_price
-                    cheapest_flight = offering
-                    
-            except (ValueError, TypeError, KeyError):
+                            if price and float(price) < lowest_price:
+                                lowest_price = float(price)
+                                cheapest_flight = offering
+                                
+            except Exception:
                 continue
         
         if cheapest_flight:
             state["cheapest_flight"] = cheapest_flight
             
-            # Extract flight details with search dates from state
+            # Extract flight details
             flight_details = extract_flight_details(cheapest_flight, state)
             state["response_text"] = format_flight_response(flight_details)
             
             print(f"✅ Found cheapest flight: ${lowest_price}")
         else:
-            state["response_text"] = "✈️ I found flights but couldn't determine pricing. Please try again."
+            state["response_text"] = "✈️ I found flights but couldn't determine pricing."
             
     except Exception as e:
-        print(f"❌ Error analyzing flights: {e}")
-        state["response_text"] = "😔 Sorry, I had trouble analyzing the flight options."
+        print(f"❌ Error in original analysis: {e}")
+        state["response_text"] = "😔 Error analyzing flight results."
     
     return state
 
 
-def extract_flight_details(flight_offering: Dict, state: Optional[FlightBookingState] = None) -> Dict:
-    """Extract relevant details from a flight offering"""
+def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
+    """Enhanced analysis supporting both single and bulk search results"""
+    
+    search_type = state.get("search_type", "specific")
+    
+    if search_type == "specific":
+        # Use original analysis for single date searches
+        return find_cheapest_flight_original(state)
+    
+    elif search_type == "range":
+        # New bulk analysis for date range searches
+        return analyze_bulk_search_results(state)
+    
+    else:
+        state["response_text"] = "Invalid search type for analysis."
+        return state
+
+
+def extract_flight_details(flight_offering: Dict, state: FlightBookingState, override_date: Optional[str] = None) -> Dict:
+    """Enhanced flight details extraction"""
+    
     details = {
         "price": "N/A",
-        "currency": "USD",
+        "currency": "EUR",
         "departure_time": "N/A",
-        "arrival_time": "N/A", 
-        "departure_date": "N/A",
-        "return_date": "N/A",
-        "duration": "N/A",
-        "airline": "N/A",
-        "baggage": "Check with airline",
-        "stops": "N/A"
+        "arrival_time": "N/A",
+        "airline": "Various",
+        "stops": "N/A",
+        "baggage": "Standard"
     }
     
     try:
-        # Extract price using correct Travelport API structure
+        # Extract price information
         product_brand_options = flight_offering.get("ProductBrandOptions", [])
-        if product_brand_options and isinstance(product_brand_options, list):
-            first_option = product_brand_options[0]
-            product_brand_offering = first_option.get("ProductBrandOffering", [])
-            if product_brand_offering and isinstance(product_brand_offering, list):
-                first_offering = product_brand_offering[0]
-                best_price = first_offering.get("BestCombinablePrice", {})
-                
-                details["price"] = best_price.get("TotalPrice", "N/A")
-                currency_info = best_price.get("CurrencyCode", {})
-                details["currency"] = currency_info.get("value", "EUR") if isinstance(currency_info, dict) else "EUR"
+        if product_brand_options:
+            for option in product_brand_options:
+                product_brand_offerings = option.get("ProductBrandOffering", [])
+                for brand_offering in product_brand_offerings:
+                    best_price = brand_offering.get("BestCombinablePrice", {})
+                    if isinstance(best_price, dict) and best_price.get("TotalPrice"):
+                        details["price"] = str(best_price["TotalPrice"])
+                        currency_info = best_price.get("CurrencyCode", {})
+                        details["currency"] = currency_info.get("value", "EUR") if isinstance(currency_info, dict) else "EUR"
+                        break
         
-        # Extract basic journey details from offering
-        departure_city = flight_offering.get("Departure", "N/A")
-        arrival_city = flight_offering.get("Arrival", "N/A")
+        # Use override date or state date for departure time
+        departure_date = override_date or state.get("departure_date") or state.get("best_departure_date")
         
-        # Add search dates from state if available
-        if state:
-            departure_date = state.get("departure_date", "N/A")
-            return_date_value = state.get("return_date")  # Can be None
+        if departure_date:
+            departure_city = state.get("from_city", "")
+            arrival_city = state.get("to_city", "")
+            return_date = state.get("return_date")
             
-            details["departure_date"] = departure_date
-            
-            # Handle return_date to ensure it's always a string
-            if return_date_value:
-                details["return_date"] = str(return_date_value)
+            if return_date:
+                details["departure_time"] = f"{departure_date} from {departure_city}"
+                details["arrival_time"] = f"To {arrival_city} (Return: {return_date})"
             else:
-                details["return_date"] = "One-way"
-            
-            # Format departure and arrival with dates
-            if departure_date != "N/A":
-                details["departure_time"] = f"From {departure_city} on {departure_date}"
+                details["departure_time"] = f"{departure_date} from {departure_city}"
                 details["arrival_time"] = f"To {arrival_city}"
-                if return_date_value:
-                    details["arrival_time"] += f" (Return: {return_date_value})"
-            else:
-                details["departure_time"] = f"From {departure_city}"
-                details["arrival_time"] = f"To {arrival_city}"
-        else:
-            # Fallback to basic format without dates
-            details["departure_time"] = f"From {departure_city}"
-            details["arrival_time"] = f"To {arrival_city}"
         
-        details["airline"] = "Check booking details"
-        details["stops"] = "Check itinerary"
-        
-        # Extract baggage information
-        baggage_info = flight_offering.get("Product", [{}])[0].get("BaggageAllowance", [])
-        if baggage_info:
-            details["baggage"] = f"{baggage_info[0].get('MaximumWeight', {}).get('value', 'Standard')} {baggage_info[0].get('MaximumWeight', {}).get('unit', 'kg')}"
-            
     except Exception as e:
-        print(f"Warning: Could not extract some flight details: {e}")
+        print(f"Warning: Could not extract enhanced flight details: {e}")
     
     return details
 
 
 def format_flight_response(details: Dict) -> str:
-    """Format flight details into a user-friendly response"""
+    """Enhanced flight response formatting"""
     
-    # Format the response with dates
     response = f"""✈️ FLIGHT FOUND! ✈️
 
 💰 Price: {details['currency']} {details['price']}
@@ -331,26 +523,38 @@ def format_flight_response(details: Dict) -> str:
     return response
 
 
-# LangGraph workflow decision functions
+# Updated workflow decision functions
 def should_search_flights(state: FlightBookingState) -> str:
-    """Decision function to determine next step"""
+    """Enhanced decision function for routing"""
     if state.get("response_text") and "couldn't understand" in state["response_text"]:
         return "end"
-    if not state.get("from_city") or not state.get("to_city") or not state.get("departure_date"):
+    if not state.get("from_city") or not state.get("to_city"):
         return "end"
+    
+    search_type = state.get("search_type", "specific")
+    if search_type == "specific" and not state.get("departure_date"):
+        return "end"
+    if search_type == "range" and (not state.get("date_range_start") or not state.get("date_range_end")):
+        return "end"
+    
     return "search"
 
 
 def should_analyze_flights(state: FlightBookingState) -> str:
-    """Decision function after flight search"""
-    if state.get("raw_api_response"):
-        return "analyze"
-    return "end"
+    """Enhanced decision function for analysis routing"""
+    search_type = state.get("search_type", "specific")
+    
+    if search_type == "specific":
+        return "analyze" if state.get("raw_api_response") else "end"
+    elif search_type == "range":
+        return "analyze" if state.get("bulk_search_results") else "end"
+    else:
+        return "end"
 
 
-# Create the LangGraph workflow
+# Create the enhanced LangGraph workflow
 def create_flight_booking_agent():
-    """Create and compile the LangGraph flight booking agent"""
+    """Create and compile the enhanced LangGraph flight booking agent"""
     
     workflow = StateGraph(FlightBookingState)
     workflow.add_node("parse", parse_travel_request)
@@ -365,5 +569,5 @@ def create_flight_booking_agent():
     return workflow.compile()
 
 
-# Create the compiled agent
-flight_booking_agent = create_flight_booking_agent() 
+# Create the enhanced compiled agent with original name
+flight_booking_agent = create_flight_booking_agent()

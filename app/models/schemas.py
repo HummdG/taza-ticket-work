@@ -2,7 +2,7 @@
 Data models, schemas, and state definitions for the flight booking bot
 """
 
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Any
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 from langchain_core.messages import HumanMessage, AIMessage
@@ -30,10 +30,19 @@ class FlightBookingState(TypedDict):
     return_date: Optional[str]
     passengers: int
     passenger_age: int
-    raw_api_response: Optional[Dict]
-    cheapest_flight: Optional[Dict]
+    raw_api_response: Optional[Dict[str, Any]]
+    cheapest_flight: Optional[Dict[str, Any]]
     response_text: str
     conversation_context: Optional[str]
+    
+    # Enhanced fields for bulk search functionality
+    search_type: Optional[str]  # "specific" or "range"
+    date_range_start: Optional[str]  # Start date for range searches
+    date_range_end: Optional[str]  # End date for range searches
+    range_description: Optional[str]  # Human-readable description of range
+    bulk_search_results: Optional[Dict[str, Dict[str, Any]]]  # date -> api_response mapping
+    search_dates: Optional[List[str]]  # List of dates that were searched
+    best_departure_date: Optional[str]  # Best date found in range search
 
 
 # Flight details response model
@@ -53,4 +62,4 @@ class VoiceTestMessage(BaseModel):
     message: str = ""  # Can be empty for voice-only messages
     user_id: Optional[str] = None
     media_url: Optional[str] = None
-    media_content_type: Optional[str] = None 
+    media_content_type: Optional[str] = None
