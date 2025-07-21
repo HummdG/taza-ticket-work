@@ -7,7 +7,9 @@ import os
 from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+from dotenv import load_dotenv
 
+load_dotenv()
 # Initialize LLM for general conversation
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",

@@ -12,3 +12,5 @@ typing-extensions
 openai
 langchain-google-genai 
 twilio==8.10.0 
+boto3==1.34.0 
+langdetect==1.0.9
