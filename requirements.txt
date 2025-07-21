@@ -11,3 +11,4 @@ twilio==8.10.0
 typing-extensions
 openai
 langchain-google-genai 
+twilio==8.10.0 

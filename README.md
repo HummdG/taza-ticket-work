@@ -19,10 +19,6 @@ TRAVELPORT_ACCESS_GROUP=your_access_group_here
 # OpenAI Configuration
 OPENAI_API_KEY=sk-your-openai-key-here
 
-# Twilio Configuration (for voice message support)
-TWILIO_ACCOUNT_SID=your_twilio_account_sid_here
-TWILIO_AUTH_TOKEN=your_twilio_auth_token_here
-
 # Webhook Configuration
 WEBHOOK_VERIFY_TOKEN=your_secure_token_here
 ```
@@ -86,25 +82,13 @@ Send messages to your WhatsApp bot like:
 - "Book a flight from LHE to ATH next month returning in a week"
 - "Find flights from Karachi to London departing tomorrow"
 
-### 🎤 Voice Message Support
-
-The bot now supports voice messages! Simply:
-
-1. Hold the microphone button in WhatsApp
-2. Record your flight request (e.g., "I need a flight from New York to London next week")
-3. Send the voice note
-4. The bot will transcribe your message and respond normally
-
-Voice messages work for all features including flight searches, general conversation, and flight information collection.
-
 ## 🛠 API Endpoints
 
 - `GET /` - API info
 - `GET /health` - Health check
 - `GET /webhook` - WhatsApp webhook verification
-- `POST /webhook` - Handle WhatsApp messages (including voice messages)
+- `POST /webhook` - Handle WhatsApp messages
 - `POST /test` - Test flight search functionality
-- `POST /test-voice` - Test voice message transcription functionality
 
 ## 🔧 Local Development
 
@@ -154,14 +138,7 @@ docker stop <container-id>
    - Verify your OpenAI API key
    - Check API usage limits
 
-4. **Voice message not working**
-
-   - Ensure `TWILIO_ACCOUNT_SID` and `TWILIO_AUTH_TOKEN` are set in `.env`
-   - Check that OpenAI API key is valid
-   - Verify Twilio webhook is configured to send media
-
-5. **Webhook not receiving messages**
-
+4. **Webhook not receiving messages**
    - Ensure ngrok/deployment URL is HTTPS
    - Check Twilio webhook configuration
    - Verify webhook verification token

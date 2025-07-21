@@ -45,12 +45,4 @@ class FlightDetails(BaseModel):
     duration: str = "N/A"
     airline: str = "N/A"
     baggage: str = "Check with airline"
-    stops: str = "N/A"
-
-
-class VoiceTestMessage(BaseModel):
-    """Test message model for voice message testing"""
-    message: str = ""  # Can be empty for voice-only messages
-    user_id: Optional[str] = None
-    media_url: Optional[str] = None
-    media_content_type: Optional[str] = None 
+    stops: str = "N/A" 

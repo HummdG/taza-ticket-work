@@ -5,7 +5,7 @@ LangGraph flight booking agent and workflow management
 import json
 import requests
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Dict
 
 # LangGraph and LangChain imports
 from langgraph.graph import StateGraph, END
@@ -233,8 +233,8 @@ def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
         if cheapest_flight:
             state["cheapest_flight"] = cheapest_flight
             
-            # Extract flight details with search dates from state
-            flight_details = extract_flight_details(cheapest_flight, state)
+            # Extract flight details
+            flight_details = extract_flight_details(cheapest_flight)
             state["response_text"] = format_flight_response(flight_details)
             
             print(f"✅ Found cheapest flight: ${lowest_price}")
@@ -248,15 +248,13 @@ def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
     return state
 
 
-def extract_flight_details(flight_offering: Dict, state: Optional[FlightBookingState] = None) -> Dict:
+def extract_flight_details(flight_offering: Dict) -> Dict:
     """Extract relevant details from a flight offering"""
     details = {
         "price": "N/A",
         "currency": "USD",
         "departure_time": "N/A",
         "arrival_time": "N/A", 
-        "departure_date": "N/A",
-        "return_date": "N/A",
         "duration": "N/A",
         "airline": "N/A",
         "baggage": "Check with airline",
@@ -281,33 +279,9 @@ def extract_flight_details(flight_offering: Dict, state: Optional[FlightBookingS
         departure_city = flight_offering.get("Departure", "N/A")
         arrival_city = flight_offering.get("Arrival", "N/A")
         
-        # Add search dates from state if available
-        if state:
-            departure_date = state.get("departure_date", "N/A")
-            return_date_value = state.get("return_date")  # Can be None
-            
-            details["departure_date"] = departure_date
-            
-            # Handle return_date to ensure it's always a string
-            if return_date_value:
-                details["return_date"] = str(return_date_value)
-            else:
-                details["return_date"] = "One-way"
-            
-            # Format departure and arrival with dates
-            if departure_date != "N/A":
-                details["departure_time"] = f"From {departure_city} on {departure_date}"
-                details["arrival_time"] = f"To {arrival_city}"
-                if return_date_value:
-                    details["arrival_time"] += f" (Return: {return_date_value})"
-            else:
-                details["departure_time"] = f"From {departure_city}"
-                details["arrival_time"] = f"To {arrival_city}"
-        else:
-            # Fallback to basic format without dates
-            details["departure_time"] = f"From {departure_city}"
-            details["arrival_time"] = f"To {arrival_city}"
-        
+        # Set basic available details  
+        details["departure_time"] = f"From {departure_city}"
+        details["arrival_time"] = f"To {arrival_city}"
         details["airline"] = "Check booking details"
         details["stops"] = "Check itinerary"
         
@@ -325,8 +299,7 @@ def extract_flight_details(flight_offering: Dict, state: Optional[FlightBookingS
 def format_flight_response(details: Dict) -> str:
     """Format flight details into a user-friendly response"""
     
-    # Format the response with dates
-    response = f"""✈️ FLIGHT FOUND! ✈️
+    return f"""✈️ FLIGHT FOUND! ✈️
 
 💰 Price: {details['currency']} {details['price']}
 🛫 Departure: {details['departure_time']}
@@ -336,8 +309,6 @@ def format_flight_response(details: Dict) -> str:
 🧳 Baggage: {details['baggage']}
 
 ❓ Would you like me to search for more options or help you with booking?"""
-    
-    return response
 
 
 # LangGraph workflow decision functions
