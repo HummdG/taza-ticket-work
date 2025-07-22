@@ -259,7 +259,7 @@ def detect_language(text: str) -> str:
 
 def generate_voice_response(text: str, language: str = 'en', user_id: str = "unknown") -> Optional[str]:
     """
-    Generate voice response using natural speech formatting + AWS services
+    Generate voice response using natural speech formatting + OpenAI TTS (primary)
     
     Args:
         text: Text to convert to speech (will be formatted and translated)
@@ -278,7 +278,7 @@ def generate_voice_response(text: str, language: str = 'en', user_id: str = "unk
         natural_speech_text = format_flight_for_speech(text, language)
         print(f"🗣️ Natural speech: '{natural_speech_text[:100]}...'")
         
-        # Step 2: Translate to target language if not English
+        # Step 2: Translate to target language if not English (keep AWS Translate)
         final_text = natural_speech_text
         if language != 'en' and aws_translation_service.is_configured():
             print(f"🌐 Translating natural speech to {language}...")
@@ -287,77 +287,86 @@ def generate_voice_response(text: str, language: str = 'en', user_id: str = "unk
         elif language != 'en':
             print(f"⚠️ AWS Translate not available, using original text")
         
-        # Step 3: Generate speech using AWS Polly
-        if aws_polly_service.is_configured():
-            print(f"🎤 Generating speech with AWS Polly for language: {language}")
-            voice_file_path = generate_polly_speech(final_text, language, user_id)
-            
-            if voice_file_path:
-                print(f"✅ AWS Polly voice response generated: {voice_file_path}")
-                return voice_file_path
-            else:
-                print(f"❌ AWS Polly speech generation failed")
-        else:
-            print(f"⚠️ AWS Polly not available")
+        # Step 3: Generate speech using OpenAI TTS (PRIMARY METHOD)
+        voice_file_path = generate_voice_response_openai_primary(final_text, language, user_id)
         
-        # Fallback: Use OpenAI TTS if AWS Polly fails
-        return generate_voice_response_openai_fallback(final_text, language, user_id)
+        if voice_file_path:
+            print(f"✅ OpenAI TTS voice response generated: {voice_file_path}")
+            return voice_file_path
+        else:
+            print(f"❌ OpenAI TTS speech generation failed")
+        
+        # Fallback: Use AWS Polly if OpenAI fails (optional fallback)
+        if aws_polly_service.is_configured():
+            print(f"🔄 Falling back to AWS Polly...")
+            polly_voice_file_path = generate_polly_speech(final_text, language, user_id)
+            
+            if polly_voice_file_path:
+                print(f"✅ AWS Polly fallback voice response generated: {polly_voice_file_path}")
+                return polly_voice_file_path
+            else:
+                print(f"❌ AWS Polly fallback also failed")
+        else:
+            print(f"⚠️ AWS Polly not available for fallback")
+        
+        return None
         
     except Exception as e:
         print(f"❌ Voice generation error: {e}")
-        return generate_voice_response_openai_fallback(text, language, user_id)
+        return None
 
 
-def generate_voice_response_openai_fallback(text: str, language: str = 'en', user_id: str = "unknown") -> Optional[str]:
+def generate_voice_response_openai_primary(text: str, language: str = 'en', user_id: str = "unknown") -> Optional[str]:
     """
-    Fallback voice response using OpenAI TTS (original implementation)
+    Primary voice response using OpenAI TTS with enhanced natural speech
     """
     
-    # Import OpenAI for fallback
+    # Import OpenAI
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     except ImportError:
-        print("❌ OpenAI library not available for fallback TTS")
+        print("❌ OpenAI library not available")
         return None
     
-    if not client:
-        print("❌ OpenAI client not available for fallback TTS")
+    if not openai_client:
+        print("❌ OpenAI client not available")
         return None
     
     try:
-        print(f"🔄 Using OpenAI TTS as fallback for language: {language}")
+        print(f"🎤 Using OpenAI TTS for language: {language}")
         
-        # Clean text for TTS
-        cleaned_text = clean_text_for_tts(text)
+        # Clean text for TTS (keep the enhanced cleaning from AWS services)
+        cleaned_text = clean_text_for_enhanced_tts(text)
         
-        # Voice selection for OpenAI (simplified)
+        # Enhanced voice selection for OpenAI with better language mapping
         voice_mapping = {
-            'en': 'alloy',
-            'ur': 'nova',
-            'ar': 'shimmer',
-            'hi': 'echo',
-            'es': 'fable',
-            'fr': 'onyx',
-            'de': 'alloy',
-            'it': 'nova',
-            'pt': 'shimmer',
-            'ru': 'echo',
-            'ja': 'fable',
-            'ko': 'onyx',
-            'zh': 'alloy',
-            'default': 'alloy'
+            'en': 'alloy',      # English - natural and clear
+            'ur': 'nova',       # Urdu - use Nova (warm, engaging)
+            'ar': 'shimmer',    # Arabic - use Shimmer (warm, whispery) 
+            'hi': 'echo',       # Hindi - use Echo (boyish)
+            'es': 'fable',      # Spanish - use Fable (expressive)
+            'fr': 'onyx',       # French - use Onyx (deep, authoritative)
+            'de': 'alloy',      # German - use Alloy (neutral)
+            'it': 'nova',       # Italian - use Nova
+            'pt': 'shimmer',    # Portuguese - use Shimmer
+            'ru': 'echo',       # Russian - use Echo
+            'ja': 'fable',      # Japanese - use Fable
+            'ko': 'onyx',       # Korean - use Onyx
+            'zh': 'alloy',      # Chinese - use Alloy
+            'default': 'alloy'  # Fallback
         }
         
         voice = voice_mapping.get(language, voice_mapping['default'])
+        print(f"🎵 Using OpenAI voice: {voice}")
         
-        # Generate speech using OpenAI TTS
-        response = client.audio.speech.create(
-            model="tts-1",
+        # Generate speech using OpenAI TTS with optimized settings
+        response = openai_client.audio.speech.create(
+            model="gpt-4o-mini-tts",  # Use high-definition model for better quality
             voice=voice,
             input=cleaned_text,
             response_format="mp3",
-            speed=0.85  # Slower speech
+            speed=1  # Slightly slower for better clarity in multiple languages
         )
         
         # Save to temporary file
@@ -369,34 +378,34 @@ def generate_voice_response_openai_fallback(text: str, language: str = 'en', use
             for chunk in response.iter_bytes():
                 f.write(chunk)
         
-        print(f"✅ OpenAI TTS fallback generated: {temp_path}")
+        print(f"✅ OpenAI TTS voice generated: {temp_path}")
         return temp_path
         
     except Exception as e:
-        print(f"❌ OpenAI TTS fallback failed: {e}")
+        print(f"❌ OpenAI TTS error: {e}")
         return None
 
 
-def clean_text_for_tts(text: str) -> str:
+def clean_text_for_enhanced_tts(text: str) -> str:
     """
-    Clean text for better TTS output (works for both AWS Polly and OpenAI)
+    Enhanced text cleaning for better TTS output (optimized for natural speech)
     
     Args:
         text: Original text with emojis and formatting
         
     Returns:
-        str: Cleaned text suitable for TTS
+        str: Cleaned text optimized for natural TTS
     """
     import re
     
-    # Remove or replace emojis with text descriptions
+    # Remove or replace emojis with text descriptions for natural flow
     emoji_replacements = {
         '✈️': 'flight',
-        '🎯': 'destination',
+        '🎯': 'destination', 
         '📅': 'date',
         '💰': 'price',
         '🛫': 'departure',
-        '🛬': 'arrival',
+        '🛬': 'arrival', 
         '🏢': 'airline',
         '🔄': 'stops',
         '🧳': 'baggage',
@@ -412,7 +421,7 @@ def clean_text_for_tts(text: str) -> str:
         '✅': '',
         '❌': '',
         '⚠️': 'warning',
-        '🎉': '',
+        '🎉': 'great',
     }
     
     cleaned_text = text
@@ -424,20 +433,53 @@ def clean_text_for_tts(text: str) -> str:
                              u"\U0001F600-\U0001F64F"  # emoticons
                              u"\U0001F300-\U0001F5FF"  # symbols & pictographs
                              u"\U0001F680-\U0001F6FF"  # transport & map
-                             u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
+                             u"\U0001F1E0-\U0001F1FF"  # flags
                              u"\U00002702-\U000027B0"
                              u"\U000024C2-\U0001F251"
                              "]+", flags=re.UNICODE)
     cleaned_text = emoji_pattern.sub('', cleaned_text)
     
-    # Clean up extra whitespace
+    # Replace problematic characters and abbreviations for natural speech
+    replacements = {
+        'USD': 'US Dollars',
+        'EUR': 'Euros', 
+        'GBP': 'British Pounds',
+        'AED': 'UAE Dirhams',
+        'PKR': 'Pakistani Rupees',
+        'N/A': 'not available',
+        '&': 'and',
+        '@': 'at',
+        '#': 'number',
+        '%': 'percent',
+        '+': 'plus',
+        '=': 'equals',
+        'vs': 'versus',
+        'e.g.': 'for example',
+        'etc.': 'and so on',
+    }
+    
+    for old, new in replacements.items():
+        cleaned_text = cleaned_text.replace(old, new)
+    
+    # Add natural pauses for better speech flow
+    cleaned_text = re.sub(r'([.!?])\s*', r'\1 ', cleaned_text)
+    
+    # Clean up multiple spaces and normalize
     cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
     
-    # Limit length for TTS
-    if len(cleaned_text) > 4000:
-        cleaned_text = cleaned_text[:4000] + "..."
+    # Limit length for TTS (OpenAI has a 4096 character limit)
+    if len(cleaned_text) > 3500:
+        cleaned_text = cleaned_text[:3500] + "... Please let me know if you need more information."
     
     return cleaned_text
+
+
+# Update the OpenAI fallback function name to avoid confusion
+def generate_voice_response_openai_fallback(text: str, language: str = 'en', user_id: str = "unknown") -> Optional[str]:
+    """
+    Legacy fallback method - now just calls the primary OpenAI method
+    """
+    return generate_voice_response_openai_primary(text, language, user_id)
 
 def upload_voice_file_to_accessible_url(file_path: str, user_id: str = "unknown") -> Optional[str]:
     """
