@@ -21,6 +21,10 @@ from ..services.memory_service import memory_manager
 from ..services.flight_info_collector import flight_collector
 from dotenv import load_dotenv
 from ..services.public_s3_handler import public_tazaticket_s3
+from .aws_services import aws_translation_service, aws_polly_service, translate_to_language, generate_polly_speech
+from .speech_formatter import format_flight_for_speech
+
+DetectorFactory.seed = 0
 
 load_dotenv()
 # Import OpenAI for Whisper and TTS APIs
@@ -255,58 +259,109 @@ def detect_language(text: str) -> str:
 
 def generate_voice_response(text: str, language: str = 'en', user_id: str = "unknown") -> Optional[str]:
     """
-    Generate natural voice response using OpenAI TTS API with slower speech
+    Generate voice response using natural speech formatting + AWS services
     
     Args:
-        text: Text to convert to speech (will be made voice-friendly)
-        language: Language code for voice selection
+        text: Text to convert to speech (will be formatted and translated)
+        language: Language code for translation and voice selection
         user_id: User ID for file naming
         
     Returns:
         str: Path to generated local voice file, or None if failed
     """
     
+    try:
+        print(f"🎤 Generating voice response for language: {language}")
+        print(f"📝 Original text: '{text[:100]}...'")
+        
+        # Step 1: Convert structured response to natural speech
+        natural_speech_text = format_flight_for_speech(text, language)
+        print(f"🗣️ Natural speech: '{natural_speech_text[:100]}...'")
+        
+        # Step 2: Translate to target language if not English
+        final_text = natural_speech_text
+        if language != 'en' and aws_translation_service.is_configured():
+            print(f"🌐 Translating natural speech to {language}...")
+            final_text = translate_to_language(natural_speech_text, language)
+            print(f"✅ Translated text: '{final_text[:100]}...'")
+        elif language != 'en':
+            print(f"⚠️ AWS Translate not available, using original text")
+        
+        # Step 3: Generate speech using AWS Polly
+        if aws_polly_service.is_configured():
+            print(f"🎤 Generating speech with AWS Polly for language: {language}")
+            voice_file_path = generate_polly_speech(final_text, language, user_id)
+            
+            if voice_file_path:
+                print(f"✅ AWS Polly voice response generated: {voice_file_path}")
+                return voice_file_path
+            else:
+                print(f"❌ AWS Polly speech generation failed")
+        else:
+            print(f"⚠️ AWS Polly not available")
+        
+        # Fallback: Use OpenAI TTS if AWS Polly fails
+        return generate_voice_response_openai_fallback(final_text, language, user_id)
+        
+    except Exception as e:
+        print(f"❌ Voice generation error: {e}")
+        return generate_voice_response_openai_fallback(text, language, user_id)
+
+
+def generate_voice_response_openai_fallback(text: str, language: str = 'en', user_id: str = "unknown") -> Optional[str]:
+    """
+    Fallback voice response using OpenAI TTS (original implementation)
+    """
+    
+    # Import OpenAI for fallback
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    except ImportError:
+        print("❌ OpenAI library not available for fallback TTS")
+        return None
+    
     if not client:
-        print("❌ OpenAI client not available for TTS")
+        print("❌ OpenAI client not available for fallback TTS")
         return None
     
     try:
-        # Convert text to voice-friendly format
-        voice_friendly_text = create_voice_friendly_response(text, language)
-        print(f"🎤 Voice-friendly text: '{voice_friendly_text[:100]}...'")
+        print(f"🔄 Using OpenAI TTS as fallback for language: {language}")
         
-        # Select appropriate voice based on language with slower alternatives
-        voice_mapping_slow = {
-            'en': 'alloy',      # English - clear and slower
-            'ur': 'nova',       # Urdu - closest supported voice
-            'ar': 'shimmer',    # Arabic - clear pronunciation  
-            'hi': 'echo',       # Hindi - closest supported voice
-            'es': 'fable',      # Spanish
-            'fr': 'onyx',       # French
-            'de': 'alloy',      # German
-            'it': 'nova',       # Italian
-            'pt': 'shimmer',    # Portuguese
-            'ru': 'echo',       # Russian
-            'ja': 'fable',      # Japanese
-            'ko': 'onyx',       # Korean
-            'zh': 'alloy',      # Chinese
-            'default': 'alloy'  # Fallback
+        # Clean text for TTS
+        cleaned_text = clean_text_for_tts(text)
+        
+        # Voice selection for OpenAI (simplified)
+        voice_mapping = {
+            'en': 'alloy',
+            'ur': 'nova',
+            'ar': 'shimmer',
+            'hi': 'echo',
+            'es': 'fable',
+            'fr': 'onyx',
+            'de': 'alloy',
+            'it': 'nova',
+            'pt': 'shimmer',
+            'ru': 'echo',
+            'ja': 'fable',
+            'ko': 'onyx',
+            'zh': 'alloy',
+            'default': 'alloy'
         }
         
-        voice = voice_mapping_slow.get(language, voice_mapping_slow['default'])
-        print(f"🎤 Generating TTS with voice '{voice}' for language '{language}' (slower speech)")
+        voice = voice_mapping.get(language, voice_mapping['default'])
         
-        # Generate speech using OpenAI TTS with slower speech
+        # Generate speech using OpenAI TTS
         response = client.audio.speech.create(
-            model="tts-1",  # Use tts-1 for faster generation
+            model="tts-1",
             voice=voice,
-            input=voice_friendly_text,
+            input=cleaned_text,
             response_format="mp3",
-            speed=0.85  # 🎯 SLOWER SPEECH: 0.25 to 4.0 (1.0 is normal, 0.85 is slightly slower)
+            speed=0.85  # Slower speech
         )
         
         # Save to temporary file
-        temp_filename = f"voice_response_{user_id}_{hash(voice_friendly_text) % 10000}.mp3"
+        temp_filename = f"openai_voice_{user_id}_{hash(cleaned_text) % 10000}.mp3"
         temp_path = os.path.join(tempfile.gettempdir(), temp_filename)
         
         # Write audio data to file
@@ -314,145 +369,17 @@ def generate_voice_response(text: str, language: str = 'en', user_id: str = "unk
             for chunk in response.iter_bytes():
                 f.write(chunk)
         
-        print(f"✅ Natural voice response generated: {temp_path}")
+        print(f"✅ OpenAI TTS fallback generated: {temp_path}")
         return temp_path
         
     except Exception as e:
-        print(f"❌ TTS generation failed: {e}")
+        print(f"❌ OpenAI TTS fallback failed: {e}")
         return None
 
 
-def create_voice_friendly_response(text_response: str, detected_language: str = 'en') -> str:
-    """
-    Convert structured text response to natural voice-friendly format
-    
-    Args:
-        text_response: The original structured text response
-        detected_language: Language for voice response
-        
-    Returns:
-        str: Natural voice-friendly text
-    """
-    
-    try:
-        # Extract flight details from the text response
-        import re
-        
-        # Extract key information using regex
-        price_match = re.search(r'💰 Price: (\w+) ([\d.]+)', text_response)
-        departure_match = re.search(r'🛫 Departure: ([^\\n]+)', text_response)
-        arrival_match = re.search(r'🛬 Arrival: ([^\\n]+)', text_response)
-        airline_match = re.search(r'🏢 Airline: ([^\\n]+)', text_response)
-        stops_match = re.search(r'🔄 Stops: ([^\\n]+)', text_response)
-        baggage_match = re.search(r'🧳 Baggage: ([^\\n]+)', text_response)
-        
-        if price_match and departure_match:
-            currency = price_match.group(1)
-            price = price_match.group(2)
-            departure_info = departure_match.group(1).strip()
-            arrival_info = arrival_match.group(1).strip() if arrival_match else ""
-            airline = airline_match.group(1).strip() if airline_match else "Various airlines"
-            stops = stops_match.group(1).strip() if stops_match else "Direct flight"
-            baggage = baggage_match.group(1).strip() if baggage_match else "Standard baggage"
-            
-            # Extract cities and date from departure info
-            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', departure_info)
-            from_match = re.search(r'from ([A-Z]{3})', departure_info)
-            to_match = re.search(r'To ([A-Z]{3})', arrival_info)
-            
-            date = date_match.group(1) if date_match else "your selected date"
-            from_city = from_match.group(1) if from_match else "your departure city"
-            to_city = to_match.group(1) if to_match else "your destination"
-            
-            # Create natural voice response based on language
-            if detected_language == 'ur':
-                voice_response = f"""
-                آپ کے لیے فلائٹ مل گئی ہے! {from_city} سے {to_city} کے لیے، {price} {currency} میں، {date} کو۔ 
-                یہ {airline} کی فلائٹ ہے۔ {stops} اور {baggage} کے ساتھ۔
-                کیا آپ کو مزید آپشن چاہیے یا بکنگ میں مدد چاہیے؟
-                """
-            elif detected_language == 'ar':
-                voice_response = f"""
-                تم العثور على رحلة لك! من {from_city} إلى {to_city}، بسعر {price} {currency}، في {date}.
-                هذه رحلة {airline}. مع {stops} و {baggage}.
-                هل تريد المزيد من الخيارات أو المساعدة في الحجز؟
-                """
-            else:  # English and other languages
-                voice_response = f"""
-                Great news! I found a flight for you from {from_city} to {to_city}, 
-                for {price} {currency}, on {date}. 
-                This is with {airline}, {stops}, and includes {baggage}.
-                Would you like me to search for more options or help you with booking?
-                """
-            
-            return voice_response.strip()
-    
-    except Exception as e:
-        print(f"⚠️ Could not create voice-friendly response: {e}")
-    
-    # Fallback: Clean the original response for voice
-    return clean_text_for_voice_fallback(text_response, detected_language)
-
-
-def clean_text_for_voice_fallback(text_response: str, detected_language: str = 'en') -> str:
-    """
-    Fallback method to clean structured text for voice
-    
-    Args:
-        text_response: Original text response
-        detected_language: Language for response
-        
-    Returns:
-        str: Cleaned text suitable for voice
-    """
-    
-    # Remove all emojis and symbols
-    import re
-    
-    # Remove emoji patterns
-    emoji_pattern = re.compile("["
-                             u"\U0001F600-\U0001F64F"  # emoticons
-                             u"\U0001F300-\U0001F5FF"  # symbols & pictographs
-                             u"\U0001F680-\U0001F6FF"  # transport & map
-                             u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
-                             u"\U00002702-\U000027B0"
-                             u"\U000024C2-\U0001F251"
-                             "]+", flags=re.UNICODE)
-    
-    cleaned = emoji_pattern.sub('', text_response)
-    
-    # Replace specific patterns
-    replacements = {
-        'FLIGHT FOUND!': 'Flight found!',
-        'Price:': 'Price is',
-        'Departure:': 'Departing',
-        'Arrival:': 'Arriving',
-        'Airline:': 'Airline is',
-        'Stops:': 'Stops:',
-        'Baggage:': 'Baggage allowance is',
-        'N/A': 'not available',
-        'Various': 'various airlines'
-    }
-    
-    for old, new in replacements.items():
-        cleaned = cleaned.replace(old, new)
-    
-    # Clean up extra whitespace and line breaks
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-    
-    # Add natural intro based on language
-    if detected_language == 'ur':
-        cleaned = f"آپ کی فلائٹ مل گئی! {cleaned}"
-    elif detected_language == 'ar':
-        cleaned = f"تم العثور على رحلتك! {cleaned}"
-    else:
-        cleaned = f"Great news! {cleaned}"
-    
-    return cleaned
-
 def clean_text_for_tts(text: str) -> str:
     """
-    Clean text for better TTS output
+    Clean text for better TTS output (works for both AWS Polly and OpenAI)
     
     Args:
         text: Original text with emojis and formatting
@@ -506,12 +433,11 @@ def clean_text_for_tts(text: str) -> str:
     # Clean up extra whitespace
     cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
     
-    # Limit length for TTS (OpenAI TTS has a 4096 character limit)
+    # Limit length for TTS
     if len(cleaned_text) > 4000:
         cleaned_text = cleaned_text[:4000] + "..."
     
     return cleaned_text
-
 
 def upload_voice_file_to_accessible_url(file_path: str, user_id: str = "unknown") -> Optional[str]:
     """
@@ -660,7 +586,7 @@ def transcribe_voice_message(media_url: str, media_content_type: str) -> str:
 
 def process_user_message(user_message: str, user_id: str = "unknown", media_url: Optional[str] = None, media_content_type: Optional[str] = None) -> Tuple[str, Optional[str]]:
     """
-    Enhanced process_user_message that returns both text response and voice file URL
+    Enhanced process_user_message with AWS services integration
     
     Args:
         user_message: The user's message (could be empty for voice-only messages)
@@ -687,6 +613,7 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
             # Check if transcription failed
             if transcribed_text.startswith("🎤 I"):
                 # Return error message directly (no voice response for errors)
+                from .memory_service import memory_manager
                 memory_manager.add_conversation(user_id, "[Voice Message]", transcribed_text, "voice_error")
                 return transcribed_text, None
             
@@ -709,10 +636,16 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
             else:
                 response = "📎 I received your file! While I can't process files yet, please let me know how I can assist you with flight booking."
             
+            from .memory_service import memory_manager
             memory_manager.add_conversation(user_id, f"[{media_type.title()}]", response, "media")
             return response, None
         
+        # ... [Keep all the existing message routing logic] ...
         # Handle regular text messages (existing logic)
+        from .memory_service import memory_manager
+        from .conversation_router import should_handle_as_flight_booking, should_collect_flight_info, analyze_flight_request_completeness
+        from ..agents.general_conversation_agent import handle_general_conversation
+        
         # Get conversation context from memory
         conversation_context = memory_manager.get_conversation_context(user_id)
         
@@ -747,10 +680,11 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
         if is_voice_message and response:
             print(f"🎤 Generating voice response in language: {detected_language}")
             
+            # Use AWS services for voice generation
             voice_file_path = generate_voice_response(response, detected_language, user_id)
             
             if voice_file_path:
-                # Upload to secure S3 or local serving
+                # Upload to accessible URL
                 voice_file_url = upload_voice_file_to_accessible_url(voice_file_path, user_id)
                 
                 # Clean up local temp file after upload
@@ -772,6 +706,7 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
         
         # Still save error conversations to memory
         try:
+            from .memory_service import memory_manager
             memory_manager.add_conversation(user_id, user_message, error_response, "error")
         except:
             pass
