@@ -8,6 +8,23 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
 from dotenv import load_dotenv
 
+# Twilio client import - ADD THIS
+try:
+    from twilio.rest import Client
+    # Initialize Twilio client
+    twilio_account_sid = os.getenv('TWILIO_ACCOUNT_SID')
+    twilio_auth_token = os.getenv('TWILIO_AUTH_TOKEN')
+    
+    if twilio_account_sid and twilio_auth_token:
+        twilio_client = Client(twilio_account_sid, twilio_auth_token)
+        print("✅ Twilio client initialized successfully")
+    else:
+        twilio_client = None
+        print("⚠️ Twilio credentials not found")
+except ImportError:
+    twilio_client = None
+    print("⚠️ Twilio library not installed")
+
 # Local imports
 from .models.schemas import TestMessage, WebhookResponse
 from .services.message_handler import process_user_message, create_twiml_response
@@ -59,7 +76,7 @@ async def webhook_verify(request: Request):
 
 @app.post("/webhook")
 async def webhook_handler(request: Request):
-    """Enhanced webhook handler that sends actual voice messages"""
+    """Clean webhook handler that sends voice via TwiML"""
     try:
         # Debug: Log all incoming data
         print(f"🔍 Incoming webhook request headers: {dict(request.headers)}")
@@ -67,7 +84,7 @@ async def webhook_handler(request: Request):
         # Handle form data (Twilio format)
         form_data = await request.form()
         print(f"🔍 Form data received: {dict(form_data)}")
-        
+
         message_text = form_data.get("Body", "")
         sender = form_data.get("From", "")
         
@@ -127,36 +144,17 @@ async def webhook_handler(request: Request):
             )
             
             print(f"🤖 Generated text response: '{text_response}'")
+            if voice_file_url:
+                print(f"🎤 Generated voice file URL: {voice_file_url}")
             
-            # ✨ NEW: Send voice message if we have a voice response
+            # ✨ SIMPLE FIX: Create TwiML response with media URL if it's a voice response
             if voice_file_url and is_voice_message:
-                print(f"🎤 Sending voice message back via Twilio: {voice_file_url}")
-                
-                # Get Twilio WhatsApp number from environment
-                twilio_whatsapp_number = os.getenv('TWILIO_WHATSAPP_NUMBER', 'whatsapp:+14155238886')
-                
-                # Send voice message using Twilio
-                voice_sent = await send_voice_message_via_twilio(
-                    to_number=sender,
-                    from_number=twilio_whatsapp_number,
-                    voice_file_url=voice_file_url,
-                    text_fallback=text_response
-                )
-                
-                if voice_sent:
-                    # Voice sent successfully, return empty TwiML to avoid duplicate
-                    print(f"✅ Voice message sent successfully via Twilio")
-                    return PlainTextResponse(
-                        '<?xml version="1.0" encoding="UTF-8"?><Response></Response>', 
-                        media_type="application/xml"
-                    )
-                else:
-                    # Voice failed, fall back to text response
-                    print(f"⚠️ Voice message failed, sending text fallback")
-                    text_response = f"🎤 {text_response}"
+                print(f"🎤 Sending voice response via TwiML with media: {voice_file_url}")
+                twiml_response = create_twiml_response(text_response, voice_file_url)
+            else:
+                print(f"📝 Sending text response via TwiML")
+                twiml_response = create_twiml_response(text_response)
             
-            # Return TwiML response for text (or fallback)
-            twiml_response = create_twiml_response(text_response)
             print(f"📡 Sending TwiML response: {twiml_response}")
             
             return PlainTextResponse(twiml_response, media_type="application/xml")
@@ -188,7 +186,7 @@ async def send_voice_message_via_twilio(to_number: str, from_number: str, voice_
     
     try:
         print(f"🎤 Sending voice message to {to_number}")
-        print(f"🔗 Voice URL: {voice_file_url[:100]}...")
+        print(f"🔗 Voice URL: {voice_file_url}")
         
         # Send message with voice file as media
         message = twilio_client.messages.create(
@@ -316,6 +314,38 @@ async def test_presigned_url_endpoint(user_id: str, text: str = "Testing presign
         return {"error": str(e)}
 
 
+@app.post("/send-voice-test")
+async def send_voice_test():
+    """Quick test to send voice message to your number"""
+    
+    if not twilio_client:
+        return {"error": "Twilio client not available"}
+    
+    try:
+        # Use the S3 URL from your logs that we know works
+        test_voice_url = "https://tazaticket.s3.eu-north-1.amazonaws.com/voice/whatsapp_447948623631/20250721_225720_8fe25972.mp3"
+        
+        twilio_whatsapp_number = os.getenv('TWILIO_WHATSAPP_NUMBER', 'whatsapp:+14155238886')
+        
+        message = twilio_client.messages.create(
+            from_=twilio_whatsapp_number,
+            to='whatsapp:+447948623631',
+            body='🎤 Test voice message from TazaTicket!',
+            media_url=[test_voice_url]
+        )
+        
+        return {
+            "success": True,
+            "message_sid": message.sid,
+            "status": message.status,
+            "voice_url": test_voice_url,
+            "message": "Voice message sent! Check your WhatsApp."
+        }
+        
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.post("/test")
 async def test_endpoint(message: TestMessage):
     """Test endpoint for manual testing"""
@@ -383,20 +413,12 @@ async def clear_flight_collection_state(user_id: str):
 async def test_send_message():
     """Test endpoint to send a direct message via Twilio"""
     try:
-        from twilio.rest import Client
-        import os
+        if not twilio_client:
+            return {"error": "Twilio client not available"}
         
-        # Get Twilio credentials
-        account_sid = os.getenv('TWILIO_ACCOUNT_SID')
-        auth_token = os.getenv('TWILIO_AUTH_TOKEN')
         twilio_number = os.getenv('TWILIO_WHATSAPP_NUMBER', 'whatsapp:+14155238886')
         
-        if not all([account_sid, auth_token]):
-            return {"error": "Missing Twilio credentials"}
-        
-        client = Client(account_sid, auth_token)
-        
-        message = client.messages.create(
+        message = twilio_client.messages.create(
             body="Test message from TazaTicket bot - direct send",
             from_=twilio_number,
             to='whatsapp:+447948623631'
@@ -433,4 +455,4 @@ async def test_voice_endpoint(message: dict):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -20,6 +20,7 @@ from ..services.conversation_router import should_handle_as_flight_booking, shou
 from ..services.memory_service import memory_manager
 from ..services.flight_info_collector import flight_collector
 from dotenv import load_dotenv
+from ..services.public_s3_handler import public_tazaticket_s3
 
 load_dotenv()
 # Import OpenAI for Whisper and TTS APIs
@@ -254,10 +255,10 @@ def detect_language(text: str) -> str:
 
 def generate_voice_response(text: str, language: str = 'en', user_id: str = "unknown") -> Optional[str]:
     """
-    Generate voice response using OpenAI TTS API
+    Generate natural voice response using OpenAI TTS API with slower speech
     
     Args:
-        text: Text to convert to speech
+        text: Text to convert to speech (will be made voice-friendly)
         language: Language code for voice selection
         user_id: User ID for file naming
         
@@ -270,23 +271,42 @@ def generate_voice_response(text: str, language: str = 'en', user_id: str = "unk
         return None
     
     try:
-        # Select appropriate voice based on language
-        voice = LANGUAGE_VOICE_MAPPING.get(language, LANGUAGE_VOICE_MAPPING['default'])
-        print(f"🎤 Generating TTS with voice '{voice}' for language '{language}'")
+        # Convert text to voice-friendly format
+        voice_friendly_text = create_voice_friendly_response(text, language)
+        print(f"🎤 Voice-friendly text: '{voice_friendly_text[:100]}...'")
         
-        # Clean text for TTS (remove excessive emojis, format properly)
-        cleaned_text = clean_text_for_tts(text)
+        # Select appropriate voice based on language with slower alternatives
+        voice_mapping_slow = {
+            'en': 'alloy',      # English - clear and slower
+            'ur': 'nova',       # Urdu - closest supported voice
+            'ar': 'shimmer',    # Arabic - clear pronunciation  
+            'hi': 'echo',       # Hindi - closest supported voice
+            'es': 'fable',      # Spanish
+            'fr': 'onyx',       # French
+            'de': 'alloy',      # German
+            'it': 'nova',       # Italian
+            'pt': 'shimmer',    # Portuguese
+            'ru': 'echo',       # Russian
+            'ja': 'fable',      # Japanese
+            'ko': 'onyx',       # Korean
+            'zh': 'alloy',      # Chinese
+            'default': 'alloy'  # Fallback
+        }
         
-        # Generate speech using OpenAI TTS
+        voice = voice_mapping_slow.get(language, voice_mapping_slow['default'])
+        print(f"🎤 Generating TTS with voice '{voice}' for language '{language}' (slower speech)")
+        
+        # Generate speech using OpenAI TTS with slower speech
         response = client.audio.speech.create(
-            model="tts-1",  # Use tts-1 for speed, tts-1-hd for higher quality
+            model="tts-1",  # Use tts-1 for faster generation
             voice=voice,
-            input=cleaned_text,
-            response_format="mp3"  # WhatsApp supports MP3
+            input=voice_friendly_text,
+            response_format="mp3",
+            speed=0.85  # 🎯 SLOWER SPEECH: 0.25 to 4.0 (1.0 is normal, 0.85 is slightly slower)
         )
         
         # Save to temporary file
-        temp_filename = f"voice_response_{user_id}_{hash(cleaned_text) % 10000}.mp3"
+        temp_filename = f"voice_response_{user_id}_{hash(voice_friendly_text) % 10000}.mp3"
         temp_path = os.path.join(tempfile.gettempdir(), temp_filename)
         
         # Write audio data to file
@@ -294,13 +314,141 @@ def generate_voice_response(text: str, language: str = 'en', user_id: str = "unk
             for chunk in response.iter_bytes():
                 f.write(chunk)
         
-        print(f"✅ Voice response generated: {temp_path}")
+        print(f"✅ Natural voice response generated: {temp_path}")
         return temp_path
         
     except Exception as e:
         print(f"❌ TTS generation failed: {e}")
         return None
 
+
+def create_voice_friendly_response(text_response: str, detected_language: str = 'en') -> str:
+    """
+    Convert structured text response to natural voice-friendly format
+    
+    Args:
+        text_response: The original structured text response
+        detected_language: Language for voice response
+        
+    Returns:
+        str: Natural voice-friendly text
+    """
+    
+    try:
+        # Extract flight details from the text response
+        import re
+        
+        # Extract key information using regex
+        price_match = re.search(r'💰 Price: (\w+) ([\d.]+)', text_response)
+        departure_match = re.search(r'🛫 Departure: ([^\\n]+)', text_response)
+        arrival_match = re.search(r'🛬 Arrival: ([^\\n]+)', text_response)
+        airline_match = re.search(r'🏢 Airline: ([^\\n]+)', text_response)
+        stops_match = re.search(r'🔄 Stops: ([^\\n]+)', text_response)
+        baggage_match = re.search(r'🧳 Baggage: ([^\\n]+)', text_response)
+        
+        if price_match and departure_match:
+            currency = price_match.group(1)
+            price = price_match.group(2)
+            departure_info = departure_match.group(1).strip()
+            arrival_info = arrival_match.group(1).strip() if arrival_match else ""
+            airline = airline_match.group(1).strip() if airline_match else "Various airlines"
+            stops = stops_match.group(1).strip() if stops_match else "Direct flight"
+            baggage = baggage_match.group(1).strip() if baggage_match else "Standard baggage"
+            
+            # Extract cities and date from departure info
+            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', departure_info)
+            from_match = re.search(r'from ([A-Z]{3})', departure_info)
+            to_match = re.search(r'To ([A-Z]{3})', arrival_info)
+            
+            date = date_match.group(1) if date_match else "your selected date"
+            from_city = from_match.group(1) if from_match else "your departure city"
+            to_city = to_match.group(1) if to_match else "your destination"
+            
+            # Create natural voice response based on language
+            if detected_language == 'ur':
+                voice_response = f"""
+                آپ کے لیے فلائٹ مل گئی ہے! {from_city} سے {to_city} کے لیے، {price} {currency} میں، {date} کو۔ 
+                یہ {airline} کی فلائٹ ہے۔ {stops} اور {baggage} کے ساتھ۔
+                کیا آپ کو مزید آپشن چاہیے یا بکنگ میں مدد چاہیے؟
+                """
+            elif detected_language == 'ar':
+                voice_response = f"""
+                تم العثور على رحلة لك! من {from_city} إلى {to_city}، بسعر {price} {currency}، في {date}.
+                هذه رحلة {airline}. مع {stops} و {baggage}.
+                هل تريد المزيد من الخيارات أو المساعدة في الحجز؟
+                """
+            else:  # English and other languages
+                voice_response = f"""
+                Great news! I found a flight for you from {from_city} to {to_city}, 
+                for {price} {currency}, on {date}. 
+                This is with {airline}, {stops}, and includes {baggage}.
+                Would you like me to search for more options or help you with booking?
+                """
+            
+            return voice_response.strip()
+    
+    except Exception as e:
+        print(f"⚠️ Could not create voice-friendly response: {e}")
+    
+    # Fallback: Clean the original response for voice
+    return clean_text_for_voice_fallback(text_response, detected_language)
+
+
+def clean_text_for_voice_fallback(text_response: str, detected_language: str = 'en') -> str:
+    """
+    Fallback method to clean structured text for voice
+    
+    Args:
+        text_response: Original text response
+        detected_language: Language for response
+        
+    Returns:
+        str: Cleaned text suitable for voice
+    """
+    
+    # Remove all emojis and symbols
+    import re
+    
+    # Remove emoji patterns
+    emoji_pattern = re.compile("["
+                             u"\U0001F600-\U0001F64F"  # emoticons
+                             u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+                             u"\U0001F680-\U0001F6FF"  # transport & map
+                             u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
+                             u"\U00002702-\U000027B0"
+                             u"\U000024C2-\U0001F251"
+                             "]+", flags=re.UNICODE)
+    
+    cleaned = emoji_pattern.sub('', text_response)
+    
+    # Replace specific patterns
+    replacements = {
+        'FLIGHT FOUND!': 'Flight found!',
+        'Price:': 'Price is',
+        'Departure:': 'Departing',
+        'Arrival:': 'Arriving',
+        'Airline:': 'Airline is',
+        'Stops:': 'Stops:',
+        'Baggage:': 'Baggage allowance is',
+        'N/A': 'not available',
+        'Various': 'various airlines'
+    }
+    
+    for old, new in replacements.items():
+        cleaned = cleaned.replace(old, new)
+    
+    # Clean up extra whitespace and line breaks
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    
+    # Add natural intro based on language
+    if detected_language == 'ur':
+        cleaned = f"آپ کی فلائٹ مل گئی! {cleaned}"
+    elif detected_language == 'ar':
+        cleaned = f"تم العثور على رحلتك! {cleaned}"
+    else:
+        cleaned = f"Great news! {cleaned}"
+    
+    return cleaned
 
 def clean_text_for_tts(text: str) -> str:
     """
@@ -367,26 +515,27 @@ def clean_text_for_tts(text: str) -> str:
 
 def upload_voice_file_to_accessible_url(file_path: str, user_id: str = "unknown") -> Optional[str]:
     """
-    Upload voice file with secure presigned URLs
+    Upload voice file and return public Object URL
     
     Args:
         file_path: Local path to the voice file
         user_id: User ID for organizing files
         
     Returns:
-        str: Secure presigned URL, or local URL if S3 fails
+        str: Direct Object URL for public access
     """
     
-    # Priority 1: Try secure TazaTicket S3
-    if secure_tazaticket_s3.is_configured():
-        print("🔒 Uploading to secure TazaTicket S3...")
-        presigned_url = secure_tazaticket_s3.upload_voice_file(file_path, user_id)
-        if presigned_url:
-            return presigned_url
+    # Priority 1: Try public TazaTicket S3 (returns direct Object URLs)
+    if public_tazaticket_s3.is_configured():
+        print("🌐 Uploading to public TazaTicket S3...")
+        object_url = public_tazaticket_s3.upload_voice_file(file_path, user_id)
+        if object_url:
+            print(f"✅ Public Object URL ready: {object_url}")
+            return object_url
         else:
-            print("⚠️ Secure S3 upload failed, falling back to local")
+            print("⚠️ Public S3 upload failed, falling back to local")
     else:
-        print("⚠️ Secure S3 not configured, using local file serving")
+        print("⚠️ Public S3 not configured, using local file serving")
     
     # Priority 2: Fallback to local file serving
     try:
@@ -418,6 +567,15 @@ def upload_voice_file_to_accessible_url(file_path: str, user_id: str = "unknown"
     except Exception as e:
         print(f"❌ Failed to setup voice file serving: {e}")
         return None
+
+
+# Also add this function to get S3 stats for the new public handler:
+def get_public_s3_stats() -> dict:
+    """Get public S3 statistics for monitoring"""
+    if public_tazaticket_s3.is_configured():
+        return public_tazaticket_s3.test_connection()
+    else:
+        return {"success": False, "error": "Public S3 not configured"}
 
 
 def transcribe_voice_message(media_url: str, media_content_type: str) -> str:
@@ -797,17 +955,30 @@ def format_whatsapp_response(bot_response: str) -> str:
     return bot_response
 
 
-def create_twiml_response(message: str) -> str:
+def create_twiml_response(message: str, media_url: Optional[str] = None) -> str:
     """
     Create TwiML response for Twilio WhatsApp integration
     
     Args:
         message: The message to send
+        media_url: Optional media URL for voice/image messages
         
     Returns:
         str: TwiML formatted response
     """
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
+    
+    if media_url:
+        # Send voice message with media
+        return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Message>
+        <Body>{message}</Body>
+        <Media>{media_url}</Media>
+    </Message>
+</Response>"""
+    else:
+        # Send regular text message
+        return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Message>{message}</Message>
 </Response>"""
