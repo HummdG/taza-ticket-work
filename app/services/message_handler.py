@@ -949,7 +949,7 @@ def create_twiml_response(message: str, media_url: Optional[str] = None) -> str:
         return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Message>
-        <Body>{message}</Body>
+        
         <Media>{media_url}</Media>
     </Message>
 </Response>"""

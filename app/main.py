@@ -4,6 +4,10 @@ Main FastAPI application for WhatsApp Flight Booking Bot
 
 import os
 import uvicorn
+import asyncio
+import sys
+import time
+from typing import Optional
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
 from dotenv import load_dotenv
@@ -74,144 +78,273 @@ async def webhook_verify(request: Request):
     raise HTTPException(status_code=403, detail="Verification failed")
 
 
-@app.post("/webhook")
-async def webhook_handler(request: Request):
-    """Clean webhook handler that sends voice via TwiML"""
-    try:
-        # Debug: Log all incoming data
-        print(f"🔍 Incoming webhook request headers: {dict(request.headers)}")
-        
-        # Handle form data (Twilio format)
-        form_data = await request.form()
-        print(f"🔍 Form data received: {dict(form_data)}")
 
+
+# Also ensure your webhook handler has the right logging
+@app.post("/webhook")
+async def webhook_handler_fast_response(request: Request):
+    """Fast webhook handler with immediate response and detailed async processing"""
+    try:
+        # Parse form data quickly
+        form_data = await request.form()
         message_text = form_data.get("Body", "")
         sender = form_data.get("From", "")
-        
-        # Extract media information for voice messages, images, etc.
         media_url = str(form_data.get("MediaUrl0", "")) if form_data.get("MediaUrl0") else ""
         media_content_type = str(form_data.get("MediaContentType0", "")) if form_data.get("MediaContentType0") else ""
-        num_media = str(form_data.get("NumMedia", "0"))
         
-        print(f"📱 Media info - URL: {media_url}, Type: {media_content_type}, Count: {num_media}")
-        
-        if not message_text:
-            # Try JSON format (Meta WhatsApp Business API)
-            try:
-                json_data = await request.json()
-                print(f"🔍 JSON data received: {json_data}")
-                if json_data and "messages" in json_data.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}):
-                    messages = json_data["entry"][0]["changes"][0]["value"]["messages"]
-                    if messages:
-                        message = messages[0]
-                        message_text = message.get("text", {}).get("body", "")
-                        sender = message.get("from", "")
-                        
-                        # Handle voice messages from Meta WhatsApp API
-                        if message.get("type") == "audio":
-                            audio_info = message.get("audio", {})
-                            media_url = f"https://graph.facebook.com/v18.0/{audio_info.get('id')}"
-                            media_content_type = audio_info.get("mime_type", "audio/ogg")
-                        
-                        # Handle other media types from Meta WhatsApp API
-                        elif message.get("type") in ["image", "video", "document"]:
-                            media_info = message.get(message.get("type"), {})
-                            media_url = f"https://graph.facebook.com/v18.0/{media_info.get('id')}"
-                            media_content_type = media_info.get("mime_type", "")
-                            
-            except Exception as json_error:
-                print(f"⚠️ Could not parse JSON: {json_error}")
+        print(f"🔍 Incoming webhook request headers: {dict(request.headers)}")
+        print(f"🔍 Form data received: {dict(form_data)}")
+        print(f"📱 Media info - URL: {media_url}, Type: {media_content_type}, Count: {form_data.get('NumMedia', '0')}")
         
         if (message_text and sender) or (media_url and sender):
-            # Use sender as user_id for memory management
             user_id = str(sender)
-            
             is_voice_message = media_url and media_content_type and media_content_type.startswith('audio')
             
             if is_voice_message:
                 print(f"🎤 Voice message detected from {user_id}")
-            elif media_url and media_content_type:
-                print(f"📱 Processing WhatsApp media message from {user_id}: Type: {media_content_type}")
+                print(f"📱 Media URL: {media_url}")
+                print(f"🎵 Content Type: {media_content_type}")
+                
+                # Process voice message asynchronously (don't wait)
+                print(f"⚡ Starting async processing - detailed logs will follow...")
+                asyncio.create_task(process_voice_message_async(
+                    user_id, message_text, media_url, media_content_type
+                ))
+                
+                # Return immediate response to Twilio
+                twiml_response = """<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Message>🎤 Processing your voice message...</Message>
+</Response>"""
+                print(f"📡 Sending immediate TwiML response to prevent timeout")
+                return PlainTextResponse(twiml_response, media_type="application/xml")
+            
             else:
-                print(f"📱 Processing WhatsApp text message from {user_id}: '{message_text}'")
-            
-            # Process the user message using the message handler with media support
-            text_response, voice_file_url = process_user_message(
-                str(message_text), 
-                user_id, 
-                media_url=media_url if media_url else None,
-                media_content_type=media_content_type if media_content_type else None
-            )
-            
-            print(f"🤖 Generated text response: '{text_response}'")
-            if voice_file_url:
-                print(f"🎤 Generated voice file URL: {voice_file_url}")
-            
-            # ✨ SIMPLE FIX: Create TwiML response with media URL if it's a voice response
-            if voice_file_url and is_voice_message:
-                print(f"🎤 Sending voice response via TwiML with media: {voice_file_url}")
-                twiml_response = create_twiml_response(text_response, voice_file_url)
-            else:
+                # Handle text messages normally (with full logging)
+                print(f"📝 Processing WhatsApp text message from {user_id}: '{message_text}'")
+                
+                # Import and use the detailed processing
+                from app.services.message_handler import process_user_message
+                text_response, _ = process_user_message(str(message_text), user_id)
+                
+                print(f"🤖 Generated text response: '{text_response}'")
                 print(f"📝 Sending text response via TwiML")
-                twiml_response = create_twiml_response(text_response)
-            
-            print(f"📡 Sending TwiML response: {twiml_response}")
-            
-            return PlainTextResponse(twiml_response, media_type="application/xml")
+                
+                twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Message>{text_response}</Message>
+</Response>"""
+                print(f"📡 Sending TwiML response: {twiml_response}")
+                
+                return PlainTextResponse(twiml_response, media_type="application/xml")
         
-        return {"status": "ok"}
+        # Default response
+        return PlainTextResponse("""<?xml version="1.0" encoding="UTF-8"?>
+<Response></Response>""", media_type="application/xml")
         
     except Exception as e:
         print(f"❌ Webhook error: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        import traceback
+        traceback.print_exc()
+        # Always return valid TwiML
+        return PlainTextResponse("""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Message>Sorry, I'm having technical difficulties. Please try again.</Message>
+</Response>""", media_type="application/xml")
 
-
-async def send_voice_message_via_twilio(to_number: str, from_number: str, voice_file_url: str, text_fallback: str = "") -> bool:
-    """
-    Send voice message using Twilio WhatsApp API
+# Replace your webhook functions in app/main.py with these enhanced versions
+async def process_voice_message_async(user_id: str, message_text: str, media_url: str, media_content_type: str):
+    """Process voice message asynchronously with immediate log flushing"""
     
-    Args:
-        to_number: Recipient WhatsApp number (format: whatsapp:+1234567890)
-        from_number: Sender WhatsApp number (format: whatsapp:+1234567890)
-        voice_file_url: Public URL to the voice file
-        text_fallback: Fallback text if voice fails
-        
-    Returns:
-        bool: True if sent successfully, False otherwise
-    """
+    def flush_print(*args, **kwargs):
+        """Print with immediate flush to terminal"""
+        print(*args, **kwargs)
+        sys.stdout.flush()  # Force immediate output
     
-    if not twilio_client:
-        print("❌ Twilio client not available for sending voice messages")
-        return False
+    flush_print(f"\n{'='*80}")
+    flush_print(f"🎤 ASYNC VOICE PROCESSING STARTED")
+    flush_print(f"👤 User: {user_id}")
+    flush_print(f"🔗 Media URL: {media_url}")
+    flush_print(f"🎵 Content Type: {media_content_type}")
+    flush_print(f"{'='*80}")
+    
+    # Small delay to ensure logs are visible
+    await asyncio.sleep(0.1)
     
     try:
-        print(f"🎤 Sending voice message to {to_number}")
-        print(f"🔗 Voice URL: {voice_file_url}")
+        # Import the detailed processing function
+        from app.services.message_handler import process_user_message
         
-        # Send message with voice file as media
-        message = twilio_client.messages.create(
+        flush_print(f"🎤 Starting detailed voice message processing...")
+        flush_print(f"📱 Processing WhatsApp voice message from {user_id}")
+        
+        # Add periodic flushes during processing
+        class FlushingProcessor:
+            @staticmethod
+            def process_with_flushing():
+                # Hook into the processing to add flushes
+                original_print = print
+                
+                def flushing_print(*args, **kwargs):
+                    original_print(*args, **kwargs)
+                    sys.stdout.flush()
+                    time.sleep(0.01)  # Tiny delay to ensure output
+                
+                # Temporarily replace print
+                import builtins
+                builtins.print = flushing_print
+                
+                try:
+                    # Process the voice message with flushing prints
+                    result = process_user_message(
+                        str(message_text), 
+                        user_id,
+                        media_url=media_url,
+                        media_content_type=media_content_type
+                    )
+                    return result
+                finally:
+                    # Restore original print
+                    builtins.print = original_print
+        
+        # Process with flushing
+        text_response, voice_file_url = FlushingProcessor.process_with_flushing()
+        
+        flush_print(f"\n🎉 VOICE PROCESSING COMPLETED!")
+        flush_print(f"🤖 Generated text response: '{text_response[:100]}{'...' if len(text_response) > 100 else ''}'")
+        if voice_file_url:
+            flush_print(f"🎤 Generated voice file URL: {voice_file_url}")
+        
+        flush_print(f"\n📡 SENDING RESPONSE VIA TWILIO API...")
+        
+        # Send response via direct Twilio API call
+        if voice_file_url:
+            flush_print(f"🎤 Sending voice response via direct Twilio API...")
+            await send_voice_response_direct_api(user_id, voice_file_url, text_response)
+        else:
+            flush_print(f"📝 Sending text response via direct Twilio API...")
+            await send_text_response_direct_api(user_id, text_response)
+        
+        flush_print(f"\n✅ ASYNC VOICE PROCESSING COMPLETE")
+        flush_print(f"{'='*80}\n")
+            
+    except Exception as e:
+        flush_print(f"\n❌ ERROR IN ASYNC VOICE PROCESSING")
+        flush_print(f"🔍 Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.stdout.flush()
+        flush_print(f"🔄 Sending error message to user...")
+        await send_text_response_direct_api(user_id, "Sorry, I couldn't process your voice message. Please try again.")
+        flush_print(f"{'='*80}\n")
+
+
+
+async def send_voice_response_direct_api(to_number: str, voice_url: str, fallback_text: str):
+    """Send voice response using direct Twilio API with detailed logging"""
+    
+    try:
+        from twilio.rest import Client
+        import os
+        
+        print(f"🔧 Initializing Twilio client for voice response...")
+        
+        # Initialize Twilio client
+        twilio_account_sid = os.getenv('TWILIO_ACCOUNT_SID')
+        twilio_auth_token = os.getenv('TWILIO_AUTH_TOKEN')
+        twilio_whatsapp_number = os.getenv('TWILIO_WHATSAPP_NUMBER', 'whatsapp:+14155238886')
+        
+        if not all([twilio_account_sid, twilio_auth_token]):
+            print("❌ Twilio credentials not available")
+            return
+        
+        client = Client(twilio_account_sid, twilio_auth_token)
+        
+        print(f"🎤 Sending voice response via direct Twilio API...")
+        print(f"   📞 From: {twilio_whatsapp_number}")
+        print(f"   📱 To: {to_number}")
+        print(f"   🔗 Voice URL: {voice_url}")
+        
+        # Send voice message via direct API
+        message = client.messages.create(
+            from_=twilio_whatsapp_number,
             to=to_number,
-            from_=from_number,
-            media_url=[voice_file_url],
-            body=text_fallback if text_fallback else ""  # Optional text alongside voice
+            media_url=[voice_url]
         )
         
         print(f"✅ Voice message sent successfully!")
-        print(f"📞 Message SID: {message.sid}")
-        print(f"📊 Status: {message.status}")
+        print(f"   📞 Message SID: {message.sid}")
+        print(f"   📊 Status: {message.status}")
+        print(f"   🔗 Media URL in message: {message.media}")
         
-        return True
+        if message.error_code:
+            print(f"❌ Twilio error detected!")
+            print(f"   🔍 Error Code: {message.error_code}")
+            print(f"   📝 Error Message: {message.error_message}")
+            print(f"🔄 Falling back to text response...")
+            # Fallback to text
+            await send_text_response_direct_api(to_number, fallback_text)
+        else:
+            print(f"🎉 Voice message delivery initiated successfully!")
         
     except Exception as e:
-        print(f"❌ Failed to send voice message via Twilio: {e}")
+        print(f"❌ Error sending voice response via Twilio API:")
+        print(f"   🔍 Error: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"🔄 Falling back to text message...")
+        # Fallback to text message
+        await send_text_response_direct_api(to_number, fallback_text)
+
+
+async def send_text_response_direct_api(to_number: str, text: str):
+    """Send text response using direct Twilio API with detailed logging"""
+    
+    try:
+        from twilio.rest import Client
+        import os
         
-        # Log specific Twilio errors
-        if hasattr(e, 'code'):
-            print(f"🔍 Twilio Error Code: {e.code}")
-        if hasattr(e, 'msg'):
-            print(f"🔍 Twilio Error Message: {e.msg}")
+        print(f"🔧 Initializing Twilio client for text response...")
         
-        return False
+        twilio_account_sid = os.getenv('TWILIO_ACCOUNT_SID')
+        twilio_auth_token = os.getenv('TWILIO_AUTH_TOKEN')
+        twilio_whatsapp_number = os.getenv('TWILIO_WHATSAPP_NUMBER', 'whatsapp:+14155238886')
+        
+        if not all([twilio_account_sid, twilio_auth_token]):
+            print("❌ Twilio credentials not available")
+            return
+        
+        client = Client(twilio_account_sid, twilio_auth_token)
+        
+        print(f"📝 Sending text response via direct Twilio API...")
+        print(f"   📞 From: {twilio_whatsapp_number}")
+        print(f"   📱 To: {to_number}")
+        print(f"   💬 Message: '{text[:100]}{'...' if len(text) > 100 else ''}'")
+        
+        message = client.messages.create(
+            from_=twilio_whatsapp_number,
+            to=to_number,
+            body=text
+        )
+        
+        print(f"✅ Text message sent successfully!")
+        print(f"   📞 Message SID: {message.sid}")
+        print(f"   📊 Status: {message.status}")
+        
+        if message.error_code:
+            print(f"❌ Twilio error detected!")
+            print(f"   🔍 Error Code: {message.error_code}")
+            print(f"   📝 Error Message: {message.error_message}")
+        else:
+            print(f"🎉 Text message delivery initiated successfully!")
+        
+    except Exception as e:
+        print(f"❌ Error sending text response via Twilio API:")
+        print(f"   🔍 Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 
 
 @app.post("/test-send-voice")

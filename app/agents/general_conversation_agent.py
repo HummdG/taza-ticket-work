@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 # Initialize LLM for general conversation
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
+    model="gemini-2.5-pro",
     temperature=0.7
 )
 
