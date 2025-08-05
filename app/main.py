@@ -1,5 +1,6 @@
 """
 Main FastAPI application for WhatsApp Flight Booking Bot
+Enhanced with DynamoDB support and system monitoring
 """
 
 import os
@@ -7,6 +8,7 @@ import uvicorn
 import asyncio
 import sys
 import time
+import multiprocessing
 from typing import Optional
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -41,7 +43,7 @@ load_dotenv()
 app = FastAPI(
     title="WhatsApp Flight Booking Bot", 
     version="1.0.0",
-    description="A modular flight booking bot using Travelport API and LangGraph"
+    description="A modular flight booking bot using Travelport API and LangGraph with DynamoDB support"
 )
 
 
@@ -51,18 +53,83 @@ async def root():
     return {
         "message": "WhatsApp Flight Booking Bot API", 
         "status": "running",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "memory_service": "DynamoDB",
+        "environment": "Render" if os.getenv('RENDER') else "Local"
     }
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy", 
-        "service": "Flight Booking Bot",
-        "version": "1.0.0"
-    }
+    """Enhanced health check endpoint with DynamoDB status"""
+    try:
+        # Test memory service (DynamoDB) connection
+        stats = memory_manager.get_memory_stats()
+        dynamodb_healthy = stats.get("dynamodb_connected", False)
+        
+        return {
+            "status": "healthy" if dynamodb_healthy else "degraded", 
+            "service": "Flight Booking Bot",
+            "version": "1.0.0",
+            "memory_service": "DynamoDB",
+            "dynamodb_connected": dynamodb_healthy,
+            "table_name": stats.get("table_name", "unknown"),
+            "region": os.getenv('AWS_REGION', 'unknown')
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "service": "Flight Booking Bot", 
+            "version": "1.0.0",
+            "error": str(e)
+        }
+
+
+@app.get("/system-info")
+async def system_info():
+    """System information and worker configuration"""
+    try:
+        # Get memory stats
+        memory_stats = memory_manager.get_memory_stats()
+        
+        # Get system info
+        cpu_count = multiprocessing.cpu_count()
+        
+        return {
+            "system": {
+                "cpu_cores": cpu_count,
+                "environment": "Render" if os.getenv('RENDER') else "Local",
+                "port": os.getenv('PORT', '8000'),
+                "workers_env": os.getenv('WORKERS', 'auto-detected')
+            },
+            "memory_service": {
+                "type": "DynamoDB",
+                "connected": memory_stats.get("dynamodb_connected", False),
+                "table_name": memory_stats.get("table_name", "unknown"),
+                "region": memory_stats.get("region", "unknown"),
+                "total_items": memory_stats.get("total_items", 0),
+                "table_size_mb": memory_stats.get("table_size_mb", 0)
+            },
+            "scaling_guide": {
+                "4_workers": "80-120 concurrent users",
+                "6_workers": "120-180 concurrent users", 
+                "8_workers": "160-240 concurrent users",
+                "12_workers": "240+ concurrent users"
+            },
+            "cost_estimate": {
+                "dynamodb": "Likely FREE (AWS Free Tier: 25GB + 200M requests/month)",
+                "scaling": "DynamoDB auto-scales - no instance limits"
+            }
+        }
+    except Exception as e:
+        return {
+            "error": str(e),
+            "memory_service": "DynamoDB (connection failed)",
+            "system": {
+                "cpu_cores": multiprocessing.cpu_count(),
+                "environment": "Render" if os.getenv('RENDER') else "Local"
+            }
+        }
 
 
 @app.get("/webhook")
@@ -76,8 +143,6 @@ async def webhook_verify(request: Request):
         return PlainTextResponse(challenge)
     
     raise HTTPException(status_code=403, detail="Verification failed")
-
-
 
 
 # Also ensure your webhook handler has the right logging
@@ -114,7 +179,7 @@ async def webhook_handler_fast_response(request: Request):
                 # Return immediate response to Twilio
                 twiml_response = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Message>🎤 Processing your voice message...</Message>
+    <Message>Thanks, we're working on your query!</Message>
 </Response>"""
                 print(f"📡 Sending immediate TwiML response to prevent timeout")
                 return PlainTextResponse(twiml_response, media_type="application/xml")
@@ -239,7 +304,6 @@ async def process_voice_message_async(user_id: str, message_text: str, media_url
         flush_print(f"{'='*80}\n")
 
 
-
 async def send_voice_response_direct_api(to_number: str, voice_url: str, fallback_text: str):
     """Send voice response using direct Twilio API with detailed logging"""
     
@@ -343,8 +407,6 @@ async def send_text_response_direct_api(to_number: str, text: str):
         print(f"   🔍 Error: {e}")
         import traceback
         traceback.print_exc()
-
-
 
 
 @app.post("/test-send-voice")
@@ -503,43 +565,76 @@ async def test_webhook_format():
 
 @app.get("/memory/stats")
 async def memory_stats():
-    """Get memory usage statistics"""
-    stats = memory_manager.get_memory_stats()
-    return {"memory_stats": stats}
+    """Enhanced memory usage statistics with DynamoDB info"""
+    try:
+        stats = memory_manager.get_memory_stats()
+        
+        # Add additional system information
+        enhanced_stats = {
+            "memory_stats": stats,
+            "system_info": {
+                "memory_service": "DynamoDB",
+                "region": os.getenv('AWS_REGION', 'unknown'),
+                "table_name": os.getenv('DYNAMODB_TABLE_NAME', 'unknown'),
+                "environment": "Render" if os.getenv('RENDER') else "Local",
+                "workers": os.getenv('WORKERS', 'auto-detected')
+            }
+        }
+        
+        return enhanced_stats
+    except Exception as e:
+        return {"error": str(e), "memory_service": "DynamoDB (connection failed)"}
 
 
 @app.post("/memory/clear/{user_id}")
 async def clear_user_memory(user_id: str):
     """Clear memory for a specific user"""
-    memory_manager.clear_user_memory(user_id)
-    return {"message": f"Memory cleared for user: {user_id}"}
+    try:
+        memory_manager.clear_user_memory(user_id)
+        return {"message": f"Memory cleared for user: {user_id}", "service": "DynamoDB"}
+    except Exception as e:
+        return {"error": str(e), "user_id": user_id}
 
 
 @app.post("/memory/cleanup")
 async def cleanup_expired_memories():
     """Clean up expired memories"""
-    memory_manager.cleanup_expired_memories()
-    stats = memory_manager.get_memory_stats()
-    return {"message": "Expired memories cleaned up", "current_stats": stats}
+    try:
+        memory_manager.cleanup_expired_memories()
+        stats = memory_manager.get_memory_stats()
+        return {
+            "message": "Expired memories cleaned up (DynamoDB TTL handles this automatically)", 
+            "current_stats": stats,
+            "service": "DynamoDB"
+        }
+    except Exception as e:
+        return {"error": str(e), "service": "DynamoDB"}
 
 
 @app.get("/flight-collection/{user_id}")
 async def get_flight_collection_state(user_id: str):
     """Get current flight collection state for a user"""
-    is_collecting = memory_manager.is_collecting_flight_info(user_id)
-    collection_state = memory_manager.get_flight_collection_state(user_id)
-    return {
-        "user_id": user_id,
-        "is_collecting": is_collecting,
-        "collection_state": collection_state
-    }
+    try:
+        is_collecting = memory_manager.is_collecting_flight_info(user_id)
+        collection_state = memory_manager.get_flight_collection_state(user_id)
+        return {
+            "user_id": user_id,
+            "is_collecting": is_collecting,
+            "collection_state": collection_state,
+            "service": "DynamoDB"
+        }
+    except Exception as e:
+        return {"error": str(e), "user_id": user_id}
 
 
 @app.post("/flight-collection/clear/{user_id}")
 async def clear_flight_collection_state(user_id: str):
     """Clear flight collection state for a user"""
-    memory_manager.clear_flight_collection_state(user_id)
-    return {"message": f"Flight collection state cleared for user: {user_id}"}
+    try:
+        memory_manager.clear_flight_collection_state(user_id)
+        return {"message": f"Flight collection state cleared for user: {user_id}", "service": "DynamoDB"}
+    except Exception as e:
+        return {"error": str(e), "user_id": user_id}
 
 
 @app.get("/test/send-message")
@@ -552,7 +647,7 @@ async def test_send_message():
         twilio_number = os.getenv('TWILIO_WHATSAPP_NUMBER', 'whatsapp:+14155238886')
         
         message = twilio_client.messages.create(
-            body="Test message from TazaTicket bot - direct send",
+            body="Test message from TazaTicket bot - direct send with DynamoDB support",
             from_=twilio_number,
             to='whatsapp:+447948623631'
         )
@@ -561,7 +656,8 @@ async def test_send_message():
             "success": True,
             "message_sid": message.sid,
             "status": message.status,
-            "body": message.body
+            "body": message.body,
+            "memory_service": "DynamoDB"
         }
         
     except Exception as e:
@@ -578,13 +674,59 @@ async def test_voice_endpoint(message: dict):
     if not media_url:
         return {"error": "media_url is required for voice message testing"}
     
-    response = process_user_message(
-        "", 
-        user_id,
-        media_url=media_url,
-        media_content_type=media_content_type
-    )
-    return {"response": response, "user_id": user_id, "transcription_attempted": True}
+    try:
+        response = process_user_message(
+            "", 
+            user_id,
+            media_url=media_url,
+            media_content_type=media_content_type
+        )
+        return {
+            "response": response, 
+            "user_id": user_id, 
+            "transcription_attempted": True,
+            "memory_service": "DynamoDB"
+        }
+    except Exception as e:
+        return {"error": str(e), "user_id": user_id}
+
+
+# Add missing function that was referenced
+async def send_voice_message_via_twilio(to_number: str, from_number: str, voice_file_url: str, text_fallback: str = "") -> bool:
+    """Send voice message using Twilio WhatsApp API"""
+    
+    if not twilio_client:
+        print("❌ Twilio client not available for sending voice messages")
+        return False
+    
+    try:
+        print(f"🎤 Sending voice message to {to_number}")
+        print(f"🔗 Voice URL: {voice_file_url}")
+        
+        # Send message with voice file as media
+        message = twilio_client.messages.create(
+            to=to_number,
+            from_=from_number,
+            media_url=[voice_file_url],
+            body=text_fallback if text_fallback else ""  # Optional text alongside voice
+        )
+        
+        print(f"✅ Voice message sent successfully!")
+        print(f"📞 Message SID: {message.sid}")
+        print(f"📊 Status: {message.status}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Failed to send voice message via Twilio: {e}")
+        
+        # Log specific Twilio errors
+        if hasattr(e, 'code'):
+            print(f"🔍 Twilio Error Code: {e.code}")
+        if hasattr(e, 'msg'):
+            print(f"🔍 Twilio Error Message: {e.msg}")
+        
+        return False
 
 
 if __name__ == "__main__":
