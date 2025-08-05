@@ -187,7 +187,8 @@ async def webhook_handler_fast_response(request: Request):
         chosen = random.choice(responses)
 
         twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-    
+<Response>
+    <Message>{chosen}</Message>
 </Response>"""
 
         # 3) schedule background processing
