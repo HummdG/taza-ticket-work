@@ -135,12 +135,14 @@ async def system_info():
 @app.get("/webhook")
 async def webhook_verify(request: Request):
     """Handle WhatsApp webhook verification"""
-    token = request.query_params.get("hub.verify_token")
-    challenge = request.query_params.get("hub.challenge")
-    if token and token == os.getenv("WEBHOOK_VERIFY_TOKEN"):
+    verify_token = request.query_params.get("hub.verify_token")
+    expected_token = os.getenv("WEBHOOK_VERIFY_TOKEN", "your_verify_token")
+    
+    if verify_token == expected_token:
+        challenge = request.query_params.get("hub.challenge", "")
         return PlainTextResponse(challenge)
-    # Otherwise just return a 200 for Render’s GET
-    return PlainTextResponse("OK")
+    
+    raise HTTPException(status_code=403, detail="Verification failed")
 
 
 # Also ensure your webhook handler has the right logging
