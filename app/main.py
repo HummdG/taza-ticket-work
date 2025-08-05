@@ -11,6 +11,7 @@ import time
 import hmac
 import hashlib
 import multiprocessing
+import random
 from typing import Optional
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -158,46 +159,58 @@ async def webhook_verify(request: Request):
     return PlainTextResponse("ok")
 
 
-# Also ensure your webhook handler has the right logging
 @app.post("/webhook")
 async def webhook_handler_fast_response(request: Request):
-    """Fast webhook handler with immediate TwiML response and background processing."""
+    """Fast webhook handler with immediate, randomized TwiML and background processing."""
     try:
-        # 1) parse the incoming form
+        # 1) parse incoming form
         form_data = await request.form()
-        message_text = form_data.get("Body", "")
-        sender = form_data.get("From", "")
-        media_url = form_data.get("MediaUrl0", "")
+        message_text       = form_data.get("Body", "")
+        sender             = form_data.get("From", "")
+        media_url          = form_data.get("MediaUrl0", "")
         media_content_type = form_data.get("MediaContentType0", "")
         is_voice = bool(media_url and media_content_type and media_content_type.startswith("audio"))
 
-        # 2) build minimal TwiML reply
-        twiml_response = """<?xml version="1.0" encoding="UTF-8"?>
+        # 2) pick a random “holding” message
+        responses = [
+            "Got it - stand by!",
+            "Thanks! We’re on it now.",
+            "Message received. One moment…",
+            "Hang tight, we’ll reply shortly!",
+            "👍 Noted - will get back to you!",
+            "On it! You’ll hear from us soon.",
+            "Thanks for your patience!",
+            "We’re looking into that now.",
+            "Be right with you—thanks!",
+            "Your request is in the queue!"
+        ]
+        chosen = random.choice(responses)
+
+        twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Message>Thanks! We’ll be right with you…</Message>
+    <Message>{chosen}</Message>
 </Response>"""
 
         # 3) schedule background processing
         if sender:
             if is_voice:
-                # you already have process_voice_message_async defined
                 asyncio.create_task(
                     process_voice_message_async(sender, message_text, media_url, media_content_type)
                 )
             elif message_text:
-                # push text processing off-thread
                 asyncio.create_task(handle_text_message_async(message_text, sender))
 
         # 4) immediate return to Twilio
         return PlainTextResponse(twiml_response, media_type="application/xml")
 
     except Exception as e:
-        # on error, still return valid TwiML
         print(f"❌ Webhook error: {e}", flush=True)
+        # still return valid TwiML on error
         return PlainTextResponse("""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Message>Sorry, something went wrong. Please try again later.</Message>
 </Response>""", media_type="application/xml")
+
 
 
 async def handle_text_message_async(message_text: str, user_id: str):
