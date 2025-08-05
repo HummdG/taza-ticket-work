@@ -198,6 +198,11 @@ async def webhook_handler_fast_response(request: Request):
                 return PlainTextResponse(twiml_response, media_type="application/xml")
             
             else:
+                twiml_response = """<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Message>Thanks, we're working on your query!</Message>
+</Response>"""
+                
                 # Handle text messages normally (with full logging)
                 print(f"📝 Processing WhatsApp text message from {user_id}: '{message_text}'")
                 
