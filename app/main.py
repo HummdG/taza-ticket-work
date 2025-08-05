@@ -8,6 +8,8 @@ import uvicorn
 import asyncio
 import sys
 import time
+import hmac
+import hashlib
 import multiprocessing
 from typing import Optional
 from fastapi import FastAPI, Request, HTTPException
@@ -130,6 +132,24 @@ async def system_info():
                 "environment": "Render" if os.getenv('RENDER') else "Local"
             }
         }
+
+@app.get("/render-hook")
+async def render_verify():
+    return {"ok": True}
+
+# 2. Render’s POST for events
+@app.post("/render-hook")
+async def render_event(request: Request):
+    headers = request.headers
+    body    = await request.body()
+    ts      = headers["webhook-timestamp"]
+    sig     = headers["webhook-signature"].split(",",1)[1]
+    secret  = os.getenv("RENDER_SIGNING_SECRET").encode()
+    expected = hmac.new(secret, ts.encode()+b"." + body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(401, "Invalid Render signature")
+    # … process your build/autoscaling event …
+    return {"received": True}
 
 
 @app.get("/webhook")
