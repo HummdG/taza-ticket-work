@@ -161,79 +161,63 @@ async def webhook_verify(request: Request):
 # Also ensure your webhook handler has the right logging
 @app.post("/webhook")
 async def webhook_handler_fast_response(request: Request):
-    """Fast webhook handler with immediate response and detailed async processing"""
+    """Fast webhook handler with immediate TwiML response and background processing."""
     try:
-        # Parse form data quickly
+        # 1) parse the incoming form
         form_data = await request.form()
         message_text = form_data.get("Body", "")
         sender = form_data.get("From", "")
-        media_url = str(form_data.get("MediaUrl0", "")) if form_data.get("MediaUrl0") else ""
-        media_content_type = str(form_data.get("MediaContentType0", "")) if form_data.get("MediaContentType0") else ""
-        
-        print(f"🔍 Incoming webhook request headers: {dict(request.headers)}")
-        print(f"🔍 Form data received: {dict(form_data)}")
-        print(f"📱 Media info - URL: {media_url}, Type: {media_content_type}, Count: {form_data.get('NumMedia', '0')}")
-        
-        if (message_text and sender) or (media_url and sender):
-            user_id = str(sender)
-            is_voice_message = media_url and media_content_type and media_content_type.startswith('audio')
-            
-            if is_voice_message:
-                print(f"🎤 Voice message detected from {user_id}")
-                print(f"📱 Media URL: {media_url}")
-                print(f"🎵 Content Type: {media_content_type}")
-                
-                # Process voice message asynchronously (don't wait)
-                print(f"⚡ Starting async processing - detailed logs will follow...")
-                asyncio.create_task(process_voice_message_async(
-                    user_id, message_text, media_url, media_content_type
-                ))
-                
-                # Return immediate response to Twilio
-                twiml_response = """<?xml version="1.0" encoding="UTF-8"?>
+        media_url = form_data.get("MediaUrl0", "")
+        media_content_type = form_data.get("MediaContentType0", "")
+        is_voice = bool(media_url and media_content_type and media_content_type.startswith("audio"))
+
+        # 2) build minimal TwiML reply
+        twiml_response = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Message>Thanks, we're working on your query!</Message>
+    <Message>Thanks! We’ll be right with you…</Message>
 </Response>"""
-                print(f"📡 Sending immediate TwiML response to prevent timeout")
-                return PlainTextResponse(twiml_response, media_type="application/xml")
-            
-            else:
-                twiml_response = """<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Message>Thanks, we're working on your query!</Message>
-</Response>"""
-                
-                # Handle text messages normally (with full logging)
-                print(f"📝 Processing WhatsApp text message from {user_id}: '{message_text}'")
-                
-                # Import and use the detailed processing
-                from app.services.message_handler import process_user_message
-                text_response, _ = process_user_message(str(message_text), user_id)
-                
-                print(f"🤖 Generated text response: '{text_response}'")
-                print(f"📝 Sending text response via TwiML")
-                
-                twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Message>{text_response}</Message>
-</Response>"""
-                print(f"📡 Sending TwiML response: {twiml_response}")
-                
-                return PlainTextResponse(twiml_response, media_type="application/xml")
-        
-        # Default response
-        return PlainTextResponse("""<?xml version="1.0" encoding="UTF-8"?>
-<Response></Response>""", media_type="application/xml")
-        
+
+        # 3) schedule background processing
+        if sender:
+            if is_voice:
+                # you already have process_voice_message_async defined
+                asyncio.create_task(
+                    process_voice_message_async(sender, message_text, media_url, media_content_type)
+                )
+            elif message_text:
+                # push text processing off-thread
+                asyncio.create_task(handle_text_message_async(message_text, sender))
+
+        # 4) immediate return to Twilio
+        return PlainTextResponse(twiml_response, media_type="application/xml")
+
     except Exception as e:
-        print(f"❌ Webhook error: {e}")
-        import traceback
-        traceback.print_exc()
-        # Always return valid TwiML
+        # on error, still return valid TwiML
+        print(f"❌ Webhook error: {e}", flush=True)
         return PlainTextResponse("""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Message>Sorry, I'm having technical difficulties. Please try again.</Message>
+    <Message>Sorry, something went wrong. Please try again later.</Message>
 </Response>""", media_type="application/xml")
+
+
+async def handle_text_message_async(message_text: str, user_id: str):
+    """Background task: process text and send back via Twilio REST API."""
+    from app.services.message_handler import process_user_message
+
+    # 1) generate the reply
+    text_response, _ = process_user_message(message_text, user_id)
+
+    # 2) send via Twilio API
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token  = os.getenv("TWILIO_AUTH_TOKEN")
+    client      = Client(account_sid, auth_token)
+    from_num    = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
+
+    client.messages.create(
+        from_=from_num,
+        to=user_id,
+        body=text_response
+    )
 
 # Replace your webhook functions in app/main.py with these enhanced versions
 async def process_voice_message_async(user_id: str, message_text: str, media_url: str, media_content_type: str):
