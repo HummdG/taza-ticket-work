@@ -457,8 +457,12 @@ def analyze_bulk_search_results(state: FlightBookingState) -> FlightBookingState
 
 # Fix this function in your app/agents/flight_booking_agent.py
 
-def find_cheapest_flight_original(state: FlightBookingState) -> FlightBookingState:
-    """Original single-date analysis function with enhanced details"""
+def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
+    """Enhanced analysis with proper round-trip API response processing"""
+    
+    # Check if we have bulk search results first
+    if state.get("bulk_search_results"):
+        return analyze_bulk_search_results(state)
     
     if not state.get("raw_api_response"):
         state["response_text"] = "No flight data available to analyze."
@@ -474,48 +478,425 @@ def find_cheapest_flight_original(state: FlightBookingState) -> FlightBookingSta
             state["response_text"] = "No flights found for your search criteria."
             return state
         
+        print(f"🔍 Found {len(offerings)} catalog offerings")
+        
+        # Check if this is a round-trip response (2 offerings with opposite routes)
+        trip_type = state.get("trip_type", "one-way")
+        has_return_date = bool(state.get("return_date"))
+        
+        if (trip_type == "round-trip" or has_return_date) and len(offerings) >= 2:
+            print(f"🔄 Processing round-trip response with {len(offerings)} offerings")
+            return process_roundtrip_offerings(state, offerings)
+        else:
+            print(f"➡️ Processing one-way response")
+            return process_oneway_offering(state, offerings)
+            
+    except Exception as e:
+        print(f"❌ Error in enhanced flight analysis: {e}")
+        import traceback
+        traceback.print_exc()
+        state["response_text"] = "😔 Error analyzing flight results."
+    
+    return state
+
+def process_roundtrip_offerings(state: FlightBookingState, offerings: List[Dict]) -> FlightBookingState:
+    """Process round-trip API response with separate outbound and return offerings"""
+    
+    try:
+        from_city = str(state.get("from_city", ""))
+        to_city = str(state.get("to_city", ""))
+        
+        print(f"🔍 Looking for round-trip: {from_city} → {to_city} → {from_city}")
+        
+        # Separate outbound and return offerings
+        outbound_offering = None
+        return_offering = None
+        
+        for offering in offerings:
+            departure = offering.get("Departure", "")
+            arrival = offering.get("Arrival", "")
+            
+            print(f"   📋 Offering: {departure} → {arrival}")
+            
+            # Check if this is outbound (from_city → to_city)
+            if departure == from_city and arrival == to_city:
+                outbound_offering = offering
+                print(f"   ✅ Found outbound: {departure} → {arrival}")
+            
+            # Check if this is return (to_city → from_city)  
+            elif departure == to_city and arrival == from_city:
+                return_offering = offering
+                print(f"   ✅ Found return: {departure} → {arrival}")
+        
+        if not outbound_offering or not return_offering:
+            print(f"⚠️ Missing offerings - Outbound: {bool(outbound_offering)}, Return: {bool(return_offering)}")
+            # Fallback to one-way processing
+            return process_oneway_offering(state, offerings)
+        
+        # Find cheapest options for each leg
+        outbound_details = find_cheapest_option_in_offering(outbound_offering, state, "outbound")
+        return_details = find_cheapest_option_in_offering(return_offering, state, "return")
+        
+        if not outbound_details or not return_details:
+            state["response_text"] = "✈️ Found flights but couldn't determine pricing for round-trip."
+            return state
+        
+        # Calculate total price
+        outbound_price = float(outbound_details.get("price", 0))
+        return_price = float(return_details.get("price", 0))
+        total_price = outbound_price + return_price
+        
+        # Combine details for round-trip response
+        roundtrip_details = {
+            "trip_type": "round-trip",
+            "currency": outbound_details.get("currency", "EUR"),
+            "price": f"{total_price:.2f}",
+            
+            # Outbound flight details
+            "outbound_departure_time": outbound_details.get("departure_time", "N/A"),
+            "outbound_arrival_time": outbound_details.get("arrival_time", "N/A"),
+            "outbound_airline": outbound_details.get("airline", "N/A"),
+            "outbound_flight_number": outbound_details.get("flight_number", "N/A"),
+            "outbound_stops": outbound_details.get("stops", "N/A"),
+            "outbound_duration": outbound_details.get("duration", "N/A"),
+            "outbound_layover_details": outbound_details.get("layover_details", []),
+            
+            # Return flight details  
+            "return_departure_time": return_details.get("departure_time", "N/A"),
+            "return_arrival_time": return_details.get("arrival_time", "N/A"),
+            "return_airline": return_details.get("airline", "N/A"),
+            "return_flight_number": return_details.get("flight_number", "N/A"),
+            "return_stops": return_details.get("stops", "N/A"),
+            "return_duration": return_details.get("duration", "N/A"),
+            "return_layover_details": return_details.get("layover_details", []),
+            
+            # Combined details
+            "baggage": outbound_details.get("baggage", "Standard"),
+            "total_duration": calculate_roundtrip_total_duration(outbound_details, return_details)
+        }
+        
+        # Store results in state
+        state["cheapest_flight"] = {"outbound": outbound_offering, "return": return_offering}
+        state["response_text"] = format_flight_response(roundtrip_details)
+        
+        print(f"✅ Round-trip processed: EUR {total_price:.2f} total")
+        
+        return state
+        
+    except Exception as e:
+        print(f"❌ Error processing round-trip offerings: {e}")
+        import traceback
+        traceback.print_exc()
+        return process_oneway_offering(state, offerings)
+
+
+def find_cheapest_option_in_offering(offering: Dict, state: FlightBookingState, leg_type: str) -> Optional[Dict]:
+    """Find the cheapest option within a single offering (outbound or return)"""
+    
+    try:
+        cheapest_price = float('inf')
+        cheapest_option = None
+        best_flight_refs = []
+        best_terms_ref = None
+        
+        product_brand_options = offering.get("ProductBrandOptions", [])
+        
+        for option in product_brand_options:
+            flight_refs = option.get("flightRefs", [])
+            product_brand_offerings = option.get("ProductBrandOffering", [])
+            
+            for brand_offering in product_brand_offerings:
+                best_price = brand_offering.get("BestCombinablePrice", {})
+                if isinstance(best_price, dict):
+                    price = best_price.get("TotalPrice", 0)
+                    if price and float(price) < cheapest_price:
+                        cheapest_price = float(price)
+                        cheapest_option = brand_offering
+                        best_flight_refs = flight_refs
+                        
+                        # Get terms reference for baggage
+                        terms_conditions = brand_offering.get("TermsAndConditions", {})
+                        if isinstance(terms_conditions, dict):
+                            best_terms_ref = terms_conditions.get("termsAndConditionsRef")
+        
+        if not cheapest_option:
+            print(f"⚠️ No valid options found in {leg_type} offering")
+            return None
+        
+        # Extract detailed flight information
+        flight_details = extract_flight_details_from_refs(
+            best_flight_refs, 
+            best_terms_ref,
+            cheapest_option, 
+            state
+        )
+        
+        print(f"✅ {leg_type.title()} leg: {flight_details['currency']} {flight_details['price']}")
+        
+        return flight_details
+        
+    except Exception as e:
+        print(f"❌ Error finding cheapest option in {leg_type} offering: {e}")
+        return None
+
+
+def extract_flight_details_from_refs(flight_refs: List[str], terms_ref: Optional[str], price_option: Dict, state: FlightBookingState) -> Dict:
+    """Extract flight details from flight references and price option"""
+    
+    details = {
+        "price": "N/A",
+        "currency": "EUR",
+        "departure_time": "N/A",
+        "arrival_time": "N/A",
+        "airline": "N/A",
+        "stops": "N/A",
+        "baggage": "Standard",
+        "duration": "N/A",
+        "flight_number": "N/A",
+        "layover_details": []
+    }
+    
+    try:
+        # Extract price information
+        best_price = price_option.get("BestCombinablePrice", {})
+        if isinstance(best_price, dict):
+            details["price"] = str(best_price.get("TotalPrice", "N/A"))
+            
+            currency_info = best_price.get("CurrencyCode", {})
+            if isinstance(currency_info, dict):
+                details["currency"] = currency_info.get("value", "EUR")
+        
+        # Extract flight details from references
+        if flight_refs and state.get("raw_api_response"):
+            reference_list = state["raw_api_response"].get("CatalogProductOfferingsResponse", {}).get("ReferenceList", [])
+            
+            # Find flight reference list
+            flight_reference_list = None
+            terms_and_conditions_list = None
+            
+            for ref_list in reference_list:
+                if ref_list.get("@type") == "ReferenceListFlight":
+                    flight_reference_list = ref_list.get("Flight", [])
+                elif ref_list.get("@type") == "ReferenceListTermsAndConditions":
+                    terms_and_conditions_list = ref_list.get("TermsAndConditions", [])
+            
+            if flight_reference_list:
+                # Get flight segments for this option
+                flight_segments = []
+                for flight_ref in flight_refs:
+                    for flight in flight_reference_list:
+                        if flight.get("id") == flight_ref:
+                            flight_segments.append(flight)
+                            break
+                
+                # Sort segments by departure time
+                flight_segments.sort(key=lambda x: (
+                    x.get("Departure", {}).get("date", ""),
+                    x.get("Departure", {}).get("time", "")
+                ))
+                
+                # Extract detailed information from segments
+                if flight_segments:
+                    details.update(extract_details_from_segments(flight_segments))
+            
+            # Extract baggage information
+            if terms_ref and terms_and_conditions_list:
+                baggage_info = extract_baggage_allowance(terms_ref, terms_and_conditions_list)
+                if baggage_info:
+                    details["baggage"] = baggage_info
+    
+    except Exception as e:
+        print(f"⚠️ Error extracting flight details from refs: {e}")
+    
+    return details
+
+
+def extract_details_from_segments(flight_segments: List[Dict]) -> Dict:
+    """Extract flight details from flight segments"""
+    
+    details = {}
+    
+    try:
+        if not flight_segments:
+            return details
+        
+        # First and last segments for departure/arrival
+        first_segment = flight_segments[0]
+        last_segment = flight_segments[-1]
+        
+        # Departure info
+        departure_info = first_segment.get("Departure", {})
+        details["departure_time"] = format_flight_datetime(
+            departure_info.get("date", ""),
+            departure_info.get("time", ""),
+            departure_info.get("location", ""),
+            departure_info.get("terminal", "")
+        )
+        
+        # Arrival info
+        arrival_info = last_segment.get("Arrival", {})
+        details["arrival_time"] = format_flight_datetime(
+            arrival_info.get("date", ""),
+            arrival_info.get("time", ""),
+            arrival_info.get("location", "")
+        )
+        
+        # Airlines and flight numbers
+        airlines = set()
+        flight_numbers = []
+        
+        for segment in flight_segments:
+            carrier = segment.get("carrier", "")
+            if carrier:
+                airlines.add(get_airline_name(carrier))
+                
+            number = segment.get("number", "")
+            if number:
+                flight_numbers.append(f"{carrier}{number}")
+        
+        if airlines:
+            details["airline"] = ", ".join(airlines) if len(airlines) > 1 else list(airlines)[0]
+        
+        if flight_numbers:
+            details["flight_number"] = ", ".join(flight_numbers)
+        
+        # Stops and layover information
+        num_segments = len(flight_segments)
+        if num_segments == 1:
+            details["stops"] = "Direct flight"
+        else:
+            # Calculate layover details
+            layover_info = calculate_layover_details(flight_segments)
+            details["layover_details"] = layover_info.get("layover_details", [])
+            
+            stops_info = f"{num_segments - 1} stop(s)"
+            if details["layover_details"]:
+                layover_summary = []
+                for layover in details["layover_details"]:
+                    city = layover["city"]
+                    duration = layover["duration"]
+                    layover_summary.append(f"{city} ({duration})")
+                stops_info += f" via {', '.join(layover_summary)}"
+            
+            details["stops"] = stops_info
+        
+        # Total duration
+        total_duration = calculate_total_flight_duration(flight_segments)
+        if total_duration:
+            details["duration"] = total_duration
+    
+    except Exception as e:
+        print(f"⚠️ Error extracting details from segments: {e}")
+    
+    return details
+
+
+def process_oneway_offering(state: FlightBookingState, offerings: List[Dict]) -> FlightBookingState:
+    """Process one-way flight offerings (fallback for single offering)"""
+    
+    try:
         cheapest_flight = None
         lowest_price = float('inf')
         
-        # Find the cheapest flight
+        # Find the cheapest flight across all offerings
         for offering in offerings:
-            try:
-                product_brand_options = offering.get("ProductBrandOptions", [])
-                if not product_brand_options:
-                    continue
+            product_brand_options = offering.get("ProductBrandOptions", [])
+            
+            for option in product_brand_options:
+                product_brand_offerings = option.get("ProductBrandOffering", [])
                 
-                for option in product_brand_options:
-                    product_brand_offerings = option.get("ProductBrandOffering", [])
-                    
-                    for brand_offering in product_brand_offerings:
-                        best_price = brand_offering.get("BestCombinablePrice", {})
-                        if isinstance(best_price, dict):
-                            price = best_price.get("TotalPrice", 0)
-                            if price and float(price) < lowest_price:
-                                lowest_price = float(price)
-                                cheapest_flight = offering
-                                
-            except Exception as e:
-                print(f"⚠️ Error analyzing offering: {e}")
-                continue
+                for brand_offering in product_brand_offerings:
+                    best_price = brand_offering.get("BestCombinablePrice", {})
+                    if isinstance(best_price, dict):
+                        price = best_price.get("TotalPrice", 0)
+                        if price and float(price) < lowest_price:
+                            lowest_price = float(price)
+                            cheapest_flight = offering
         
         if cheapest_flight:
             state["cheapest_flight"] = cheapest_flight
             
-            # Extract enhanced flight details - PASS THE FULL STATE
+            # Extract flight details using existing function
             flight_details = extract_flight_details(cheapest_flight, state)
             state["response_text"] = format_flight_response(flight_details)
             
-            # FIX: Change 'details' to 'flight_details'
-            print(f"✅ Found cheapest flight: {flight_details['currency']} {flight_details['price']}")
+            print(f"✅ Found cheapest one-way flight: {flight_details['currency']} {flight_details['price']}")
         else:
             state["response_text"] = "✈️ I found flights but couldn't determine pricing."
-            
+    
     except Exception as e:
-        print(f"❌ Error in flight analysis: {e}")
+        print(f"❌ Error processing one-way offering: {e}")
         state["response_text"] = "😔 Error analyzing flight results."
     
     return state
+
+
+def calculate_roundtrip_total_duration(outbound_details: Dict, return_details: Dict) -> str:
+    """Calculate total duration for round-trip (time from first departure to final arrival)"""
+    
+    try:
+        # This would require parsing the actual departure and return dates/times
+        # For now, return a simple combination
+        outbound_duration = outbound_details.get("duration", "")
+        return_duration = return_details.get("duration", "")
+        
+        if outbound_duration and return_duration and outbound_duration != "N/A" and return_duration != "N/A":
+            return f"Outbound: {outbound_duration}, Return: {return_duration}"
+        
+        return "See individual flight durations"
+        
+    except Exception as e:
+        print(f"⚠️ Error calculating round-trip total duration: {e}")
+        return "N/A"
+
+
+# Helper functions (keeping existing ones)
+def format_flight_datetime(date_str: str, time_str: str, location: str = "", terminal: str = "") -> str:
+    """Format flight date and time for display"""
+    try:
+        from datetime import datetime
+        
+        # Parse the date (2025-08-22)
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+        
+        # Parse the time (09:55:00)
+        time_obj = datetime.strptime(time_str, "%H:%M:%S")
+        
+        # Format for display
+        formatted_date = date_obj.strftime("%b %d")  # Aug 22
+        formatted_time = time_obj.strftime("%H:%M")  # 09:55
+        
+        result = f"{formatted_date} at {formatted_time}"
+        
+        if location:
+            result += f" ({location})"
+        
+        if terminal:
+            result += f" Terminal {terminal}"
+        
+        return result
+        
+    except Exception as e:
+        print(f"⚠️ Error formatting datetime: {e}")
+        return f"{date_str} {time_str}"
+
+
+def get_airline_name(carrier_code: str) -> str:
+    """Convert IATA carrier code to airline name"""
+    airline_names = {
+        'TK': 'Turkish Airlines',
+        'A3': 'Aegean Airlines', 
+        'LH': 'Lufthansa',
+        'QR': 'Qatar Airways',
+        'EK': 'Emirates',
+        'EY': 'Etihad Airways',
+        'PK': 'Pakistan International Airlines',
+        'GF': 'Gulf Air',
+        'BA': 'British Airways',
+        'AF': 'Air France',
+        'KL': 'KLM'
+    }
+    return airline_names.get(carrier_code, carrier_code)
 
 
 
