@@ -1651,8 +1651,25 @@ def format_flight_response(details: Dict) -> str:
 ❓ Would you like me to search for more options or help you with booking?"""
     
     else:
-        # Use existing format_flight_response logic for one-way flights
-        return format_flight_response(details)
+        # FIXED: One-way flight formatting (no recursion)
+        layover_section = ""
+        if details.get("layover_details"):
+            layover_section = "\n🔄 Layovers:"
+            for layover in details["layover_details"]:
+                layover_section += f"\n   • {layover['city']} ({layover['airport_code']}) - {layover['duration']}"
+        
+        response = f"""✈️ FLIGHT FOUND! ✈️
+
+💰 Price: {details['currency']} {details['price']}
+🛫 Departure: {details['departure_time']}
+🛬 Arrival: {details['arrival_time']}
+🏢 Airline: {details['airline']}
+✈️ Flight: {details['flight_number']}
+🔄 Stops: {details['stops']}{layover_section}
+⏱️ Duration: {details['duration']}
+🧳 Baggage: {details['baggage']}
+
+❓ Would you like me to search for more options or help you with booking?"""
     
     return response
 
