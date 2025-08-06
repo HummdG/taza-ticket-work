@@ -45,40 +45,46 @@ def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
     
     Determine if the user is asking for:
     1. A specific date search
-    2. A date range search (e.g., "cheapest in September", "best price next week")
+    2. A date range search (e.g., "between 15th to 20th August", "cheapest in September", "best price next week")
     
     Return ONLY a JSON object with these fields:
     {{
         "from_city": "3-letter airport code or null",
         "to_city": "3-letter airport code or null", 
         "departure_date": "YYYY-MM-DD format or null (for specific date)",
-        "return_date": "YYYY-MM-DD format or null",
+        "return_date": "YYYY-MM-DD format or null (for return flights)",
         "passengers": "number of passengers (default 1)",
         "passenger_age": "age of passenger (default 25)",
         "search_type": "specific or range",
         "date_range_start": "YYYY-MM-DD format or null (start of range)",
         "date_range_end": "YYYY-MM-DD format or null (end of range)",
-        "range_description": "text description of the range or null"
+        "range_description": "text description of the range or null",
+        "trip_type": "one-way or round-trip",
+        "duration_days": "number of days for trip or null"
     }}
     
-    Rules:
+    Rules for date parsing:
     - Today is {today}
-    - Use standard 3-letter IATA airport codes
-    - For phrases like "cheapest in September", "best price next week", "cheapest in the next month":
+    - Use standard 3-letter IATA airport codes (ATH=Athens, ISB=Islamabad)
+    - For date ranges like "between 15th to 20th August", "from 15th to 20th August":
       - Set search_type to "range"
       - Set date_range_start and date_range_end appropriately
       - Set departure_date to null
-    - For specific dates like "tomorrow", "August 15th":
-      - Set search_type to "specific"
-      - Set departure_date to the specific date
-      - Set date_range_start and date_range_end to null
-    - September 2025 = 2025-09-01 to 2025-09-30
-    - Next week = 7 days starting from tomorrow
-    - Next month = 30 days starting from today
+    - For return flights, always extract return_date if mentioned
+    - "staying for X days" with departure Aug 15 = return date calculated
+    - August 2025 = 2025-08-01 to 2025-08-31
+    - "between 15th to 20th August" = 2025-08-15 to 2025-08-20
     
     Examples:
-    "Cheapest price from NYC to LAX in September" → search_type: "range", date_range_start: "2025-09-01", date_range_end: "2025-09-30"
-    "Flight from NYC to LAX tomorrow" → search_type: "specific", departure_date: "{tomorrow}"
+    "ticket from Athens to Islamabad between 15th to 20th August" → 
+    {{
+        "from_city": "ATH", 
+        "to_city": "ISB", 
+        "search_type": "range", 
+        "date_range_start": "2025-08-15", 
+        "date_range_end": "2025-08-20",
+        "range_description": "between 15th to 20th August"
+    }}
     """
     
     try:
@@ -96,6 +102,26 @@ def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
         
         parsed_data = json.loads(content)
         
+        # Enhanced validation for date ranges
+        if parsed_data.get("search_type") == "range":
+            if not parsed_data.get("date_range_start") or not parsed_data.get("date_range_end"):
+                print("⚠️ Date range detected but dates missing, trying to extract manually")
+                # Try manual extraction as fallback
+                manual_dates = extract_date_range_manually(state['user_message'])
+                if manual_dates:
+                    parsed_data.update(manual_dates)
+        
+        # Enhanced return date calculation
+        if parsed_data.get("duration_days") and parsed_data.get("departure_date") and not parsed_data.get("return_date"):
+            try:
+                dep_date = datetime.strptime(parsed_data["departure_date"], "%Y-%m-%d")
+                return_date = dep_date + timedelta(days=int(parsed_data["duration_days"]))
+                parsed_data["return_date"] = return_date.strftime("%Y-%m-%d")
+                parsed_data["trip_type"] = "round-trip"
+                print(f"✅ Calculated return date: {parsed_data['return_date']}")
+            except Exception as e:
+                print(f"⚠️ Error calculating return date: {e}")
+        
         # Update state with parsed information
         state.update({
             "from_city": parsed_data.get("from_city"),
@@ -107,7 +133,9 @@ def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
             "search_type": parsed_data.get("search_type", "specific"),
             "date_range_start": parsed_data.get("date_range_start"),
             "date_range_end": parsed_data.get("date_range_end"),
-            "range_description": parsed_data.get("range_description")
+            "range_description": parsed_data.get("range_description"),
+            "trip_type": parsed_data.get("trip_type", "one-way"),
+            "duration_days": parsed_data.get("duration_days")
         })
         
         print(f"✅ Enhanced parsing result: {parsed_data}")
@@ -117,6 +145,50 @@ def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
         state["response_text"] = "😅 I couldn't understand your flight request. Please provide details like: from city, to city, and travel dates."
     
     return state
+
+
+# Add this helper function
+def extract_date_range_manually(message: str) -> dict:
+    """Manual fallback for date range extraction"""
+    import re
+    from datetime import datetime, timedelta
+    
+    message_lower = message.lower()
+    current_year = datetime.now().year
+    
+    # Pattern for "between X to Y" or "from X to Y"
+    date_pattern = r'(?:between|from)\s+(\d{1,2})(?:st|nd|rd|th)?\s+to\s+(\d{1,2})(?:st|nd|rd|th)?\s+(\w+)'
+    match = re.search(date_pattern, message_lower)
+    
+    if match:
+        start_day = int(match.group(1))
+        end_day = int(match.group(2))
+        month_name = match.group(3)
+        
+        # Convert month name to number
+        month_map = {
+            'january': 1, 'jan': 1, 'february': 2, 'feb': 2, 'march': 3, 'mar': 3,
+            'april': 4, 'apr': 4, 'may': 5, 'june': 6, 'jun': 6,
+            'july': 7, 'jul': 7, 'august': 8, 'aug': 8, 'september': 9, 'sep': 9,
+            'october': 10, 'oct': 10, 'november': 11, 'nov': 11, 'december': 12, 'dec': 12
+        }
+        
+        month_num = month_map.get(month_name.lower(), 8)  # Default to August
+        
+        try:
+            start_date = f"{current_year}-{month_num:02d}-{start_day:02d}"
+            end_date = f"{current_year}-{month_num:02d}-{end_day:02d}"
+            
+            return {
+                "search_type": "range",
+                "date_range_start": start_date,
+                "date_range_end": end_date,
+                "range_description": f"between {start_day}th to {end_day}th {month_name}"
+            }
+        except:
+            pass
+    
+    return {}
 
 
 def generate_date_range(start_date: str, end_date: str, max_searches: int = 15) -> List[str]:
@@ -552,7 +624,7 @@ def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
 
 
 def extract_flight_details(flight_offering: Dict, state: FlightBookingState, override_date: Optional[str] = None) -> Dict:
-    """Enhanced flight details extraction with ReferenceList parsing and baggage information"""
+    """Enhanced flight details extraction with ReferenceList parsing, baggage information, and layover calculation"""
     
     details = {
         "price": "N/A",
@@ -563,7 +635,9 @@ def extract_flight_details(flight_offering: Dict, state: FlightBookingState, ove
         "stops": "N/A",
         "baggage": "Standard",
         "duration": "N/A",
-        "flight_number": "N/A"
+        "flight_number": "N/A",
+        "layover_details": [],  # New field for detailed layover info
+        "total_layover_time": "N/A"  # New field for total layover time
     }
     
     try:
@@ -603,7 +677,7 @@ def extract_flight_details(flight_offering: Dict, state: FlightBookingState, ove
         print(f"🔍 Best flight refs: {best_flight_refs}")
         print(f"🔍 Best terms & conditions ref: {best_terms_and_conditions_ref}")
         
-        # Step 2: Look up flight details in ReferenceList
+        # Step 2: Look up flight details in ReferenceList with enhanced layover calculation
         if best_flight_refs and state.get("raw_api_response"):
             reference_list = state["raw_api_response"].get("CatalogProductOfferingsResponse", {}).get("ReferenceList", [])
             
@@ -650,8 +724,18 @@ def extract_flight_details(flight_offering: Dict, state: FlightBookingState, ove
                             
                             break
                 
-                # Step 3: Format the extracted flight details
+                # Sort segments by departure time for proper layover calculation
+                flight_segments.sort(key=lambda x: (
+                    x.get("Departure", {}).get("date", ""),
+                    x.get("Departure", {}).get("time", "")
+                ))
+                
+                # Step 3: Enhanced layover calculation and flight details extraction
                 if flight_segments:
+                    # Calculate layover details
+                    layover_info = calculate_layover_details(flight_segments)
+                    details.update(layover_info)
+                    
                     # Departure details (first segment)
                     first_flight = flight_segments[0]
                     departure_info = first_flight.get("Departure", {})
@@ -682,26 +766,31 @@ def extract_flight_details(flight_offering: Dict, state: FlightBookingState, ove
                         else:
                             details["airline"] = f"Multiple: {', '.join(airlines)}"
                     
-                    # Stops information
+                    # Enhanced stops information with layover details
                     num_segments = len(flight_segments)
                     if num_segments == 1:
                         details["stops"] = "Direct flight"
                     else:
-                        details["stops"] = f"{num_segments - 1} stop(s)"
+                        stops_info = f"{num_segments - 1} stop(s)"
                         
-                        # Add layover information
-                        if num_segments > 1:
-                            layover_cities = []
-                            for i in range(len(flight_segments) - 1):
-                                layover_city = flight_segments[i].get("Arrival", {}).get("location", "")
-                                if layover_city:
-                                    layover_cities.append(layover_city)
+                        # Add layover cities and durations
+                        if details["layover_details"]:
+                            layover_summary = []
+                            for layover in details["layover_details"]:
+                                city = layover["city"]
+                                duration = layover["duration"]
+                                layover_summary.append(f"{city} ({duration})")
                             
-                            if layover_cities:
-                                details["stops"] += f" via {', '.join(layover_cities)}"
+                            stops_info += f" via {', '.join(layover_summary)}"
+                        
+                        details["stops"] = stops_info
                     
-                    # Duration
-                    if total_duration_minutes > 0:
+                    # Calculate total flight duration (including layovers)
+                    total_travel_duration = calculate_total_flight_duration(flight_segments)
+                    if total_travel_duration:
+                        details["duration"] = total_travel_duration
+                    elif total_duration_minutes > 0:
+                        # Fallback to sum of individual flight durations
                         hours = total_duration_minutes // 60
                         minutes = total_duration_minutes % 60
                         if hours > 0:
@@ -713,7 +802,7 @@ def extract_flight_details(flight_offering: Dict, state: FlightBookingState, ove
                     if flight_numbers:
                         details["flight_number"] = ", ".join(flight_numbers)
                 
-                print(f"✅ Enhanced flight details extracted: {details}")
+                print(f"✅ Enhanced flight details with layovers extracted: {details}")
             else:
                 print(f"⚠️ No flight reference list found")
             
@@ -736,6 +825,193 @@ def extract_flight_details(flight_offering: Dict, state: FlightBookingState, ove
         traceback.print_exc()
     
     return details
+
+
+def calculate_layover_details(flight_segments: List[Dict]) -> Dict:
+    """Calculate detailed layover information between flight segments"""
+    
+    layover_details = []
+    total_layover_minutes = 0
+    
+    try:
+        for i in range(len(flight_segments) - 1):
+            current_flight = flight_segments[i]
+            next_flight = flight_segments[i + 1]
+            
+            # Get arrival info of current flight
+            current_arrival = current_flight.get("Arrival", {})
+            arrival_date = current_arrival.get("date", "")
+            arrival_time = current_arrival.get("time", "")
+            arrival_location = current_arrival.get("location", "")
+            
+            # Get departure info of next flight  
+            next_departure = next_flight.get("Departure", {})
+            departure_date = next_departure.get("date", "")
+            departure_time = next_departure.get("time", "")
+            
+            if all([arrival_date, arrival_time, departure_date, departure_time]):
+                layover_duration = calculate_time_difference(
+                    arrival_date, arrival_time, departure_date, departure_time
+                )
+                
+                if layover_duration and layover_duration > 0:
+                    layover_details.append({
+                        "city": get_city_name_enhanced(arrival_location),
+                        "airport_code": arrival_location,
+                        "duration": format_duration_human_readable(layover_duration),
+                        "duration_minutes": layover_duration
+                    })
+                    total_layover_minutes += layover_duration
+                    
+                    print(f"✅ Layover calculated: {arrival_location} ({get_city_name_enhanced(arrival_location)}) - {format_duration_human_readable(layover_duration)}")
+    
+    except Exception as e:
+        print(f"⚠️ Error calculating layover details: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return {
+        "layover_details": layover_details,
+        "total_layover_time": format_duration_human_readable(total_layover_minutes) if total_layover_minutes > 0 else "N/A"
+    }
+
+
+def calculate_time_difference(date1: str, time1: str, date2: str, time2: str) -> Optional[int]:
+    """Calculate time difference in minutes between two datetime points"""
+    
+    try:
+        from datetime import datetime
+        
+        # Parse datetime strings (format: YYYY-MM-DD HH:MM:SS)
+        dt1_str = f"{date1} {time1}"
+        dt2_str = f"{date2} {time2}"
+        
+        dt1 = datetime.strptime(dt1_str, "%Y-%m-%d %H:%M:%S")
+        dt2 = datetime.strptime(dt2_str, "%Y-%m-%d %H:%M:%S")
+        
+        # Calculate difference
+        time_diff = dt2 - dt1
+        
+        # Return difference in minutes (ensure it's positive)
+        minutes = int(time_diff.total_seconds() / 60)
+        return max(0, minutes)  # Ensure non-negative layover time
+        
+    except Exception as e:
+        print(f"⚠️ Error calculating time difference between {date1} {time1} and {date2} {time2}: {e}")
+        return None
+
+
+def calculate_total_flight_duration(flight_segments: List[Dict]) -> Optional[str]:
+    """Calculate total flight duration from departure to final arrival (including layovers)"""
+    
+    try:
+        if not flight_segments:
+            return None
+        
+        # Get first departure and last arrival
+        first_flight = flight_segments[0]
+        last_flight = flight_segments[-1]
+        
+        first_departure = first_flight.get("Departure", {})
+        last_arrival = last_flight.get("Arrival", {})
+        
+        dep_date = first_departure.get("date", "")
+        dep_time = first_departure.get("time", "")
+        arr_date = last_arrival.get("date", "")
+        arr_time = last_arrival.get("time", "")
+        
+        if all([dep_date, dep_time, arr_date, arr_time]):
+            total_minutes = calculate_time_difference(dep_date, dep_time, arr_date, arr_time)
+            if total_minutes and total_minutes > 0:
+                return format_duration_human_readable(total_minutes)
+        
+        return None
+        
+    except Exception as e:
+        print(f"⚠️ Error calculating total flight duration: {e}")
+        return None
+
+
+def format_duration_human_readable(minutes: int) -> str:
+    """Format duration in minutes to human readable format"""
+    
+    try:
+        if minutes <= 0:
+            return "0m"
+        
+        if minutes < 60:
+            return f"{minutes}m"
+        
+        hours = minutes // 60
+        remaining_minutes = minutes % 60
+        
+        if remaining_minutes == 0:
+            return f"{hours}h"
+        else:
+            return f"{hours}h {remaining_minutes}m"
+            
+    except:
+        return f"{minutes}m" if minutes > 0 else "0m"
+
+
+def get_city_name_enhanced(airport_code: str) -> str:
+    """Enhanced city name mapping with major connection hubs"""
+    
+    city_mapping = {
+        # Major Middle East connection hubs
+        'DOH': 'Doha', 'DXB': 'Dubai', 'AUH': 'Abu Dhabi', 'SHJ': 'Sharjah',
+        'MCT': 'Muscat', 'KWI': 'Kuwait City', 'BAH': 'Bahrain', 'RUH': 'Riyadh',
+        'JED': 'Jeddah', 'CAI': 'Cairo', 'AMM': 'Amman', 'BEY': 'Beirut',
+        
+        # European connection hubs
+        'IST': 'Istanbul', 'SAW': 'Istanbul Sabiha', 'FRA': 'Frankfurt', 
+        'AMS': 'Amsterdam', 'LHR': 'London Heathrow', 'LGW': 'London Gatwick',
+        'CDG': 'Paris Charles de Gaulle', 'ORY': 'Paris Orly', 'MUC': 'Munich',
+        'ZUR': 'Zurich', 'VIE': 'Vienna', 'ATH': 'Athens', 'FCO': 'Rome',
+        'MAD': 'Madrid', 'BCN': 'Barcelona', 'ARN': 'Stockholm', 'CPH': 'Copenhagen',
+        'OSL': 'Oslo', 'HEL': 'Helsinki', 'WAW': 'Warsaw', 'PRG': 'Prague',
+        
+        # Pakistan airports
+        'LHE': 'Lahore', 'KHI': 'Karachi', 'ISB': 'Islamabad', 'PEW': 'Peshawar',
+        'MUX': 'Multan', 'UET': 'Quetta', 'RYK': 'Rahim Yar Khan', 'BWP': 'Bahawalpur',
+        'SKT': 'Sialkot', 'ATG': 'Attock', 'CJL': 'Chitral',
+        
+        # Indian major airports
+        'DEL': 'Delhi', 'BOM': 'Mumbai', 'MAA': 'Chennai', 'BLR': 'Bangalore',
+        'HYD': 'Hyderabad', 'CCU': 'Kolkata', 'COK': 'Kochi', 'TRV': 'Trivandrum',
+        'AMD': 'Ahmedabad', 'PNQ': 'Pune', 'GOI': 'Goa', 'JAI': 'Jaipur',
+        
+        # Asian connection hubs
+        'SIN': 'Singapore', 'HKG': 'Hong Kong', 'NRT': 'Tokyo Narita', 
+        'HND': 'Tokyo Haneda', 'ICN': 'Seoul Incheon', 'KUL': 'Kuala Lumpur',
+        'BKK': 'Bangkok', 'TPE': 'Taipei', 'MNL': 'Manila', 'CGK': 'Jakarta',
+        'PVG': 'Shanghai Pudong', 'PEK': 'Beijing Capital', 'CAN': 'Guangzhou',
+        'SZX': 'Shenzhen', 'CTU': 'Chengdu', 'XIY': 'Xian',
+        
+        # US major airports
+        'JFK': 'New York JFK', 'LGA': 'New York LaGuardia', 'EWR': 'Newark',
+        'LAX': 'Los Angeles', 'ORD': 'Chicago O\'Hare', 'DFW': 'Dallas-Fort Worth',
+        'MIA': 'Miami', 'SFO': 'San Francisco', 'SEA': 'Seattle', 'BOS': 'Boston',
+        'ATL': 'Atlanta', 'DEN': 'Denver', 'PHX': 'Phoenix', 'LAS': 'Las Vegas',
+        
+        # Canadian airports
+        'YYZ': 'Toronto Pearson', 'YVR': 'Vancouver', 'YUL': 'Montreal',
+        'YYC': 'Calgary', 'YOW': 'Ottawa',
+        
+        # Australian/Oceania airports
+        'SYD': 'Sydney', 'MEL': 'Melbourne', 'BNE': 'Brisbane', 'PER': 'Perth',
+        'AKL': 'Auckland', 'CHC': 'Christchurch',
+        
+        # African airports
+        'JNB': 'Johannesburg', 'CPT': 'Cape Town', 'NBO': 'Nairobi', 'ADD': 'Addis Ababa',
+        'LOS': 'Lagos', 'CMN': 'Casablanca', 'TUN': 'Tunis', 'ALG': 'Algiers',
+        
+        # South American airports
+        'GRU': 'São Paulo', 'GIG': 'Rio de Janeiro', 'EZE': 'Buenos Aires',
+        'SCL': 'Santiago', 'LIM': 'Lima', 'BOG': 'Bogotá', 'UIO': 'Quito'
+    }
+    
+    return city_mapping.get(airport_code, airport_code)
 
 
 def extract_baggage_allowance(terms_ref: str, terms_and_conditions_list: List[Dict]) -> str:
@@ -920,20 +1196,47 @@ def format_flight_datetime(date_str: str, time_str: str, location: str = "", ter
 
 
 def format_flight_response(details: Dict) -> str:
-    """Enhanced flight response formatting with all details"""
+    """Enhanced flight response formatting with layover information"""
     
-    response = f"""✈️ FLIGHT FOUND! ✈️
+    layover_section = ""
+    if details.get("layover_details"):
+        layover_section = "\n🔄 Layovers:"
+        for layover in details["layover_details"]:
+            layover_section += f"\n   • {layover['city']} ({layover['airport_code']}) - {layover['duration']}"
+        
+        if details.get("total_layover_time") != "N/A":
+            layover_section += f"\n⏰ Total layover time: {details['total_layover_time']}"
+    
+    trip_type = details.get('trip_type', 'one-way')
+    
+    if trip_type == "round-trip" and details.get('return_date'):
+        response = f"""✈️ ROUND-TRIP FLIGHT FOUND! ✈️
+
+💰 Price: {details['currency']} {details['price']} (round-trip)
+🛫 Outbound Departure: {details['departure_time']}
+🛬 Outbound Arrival: {details['arrival_time']}
+🔄 Return Departure: {details.get('return_departure_time', 'TBD')}
+🏠 Return Arrival: {details.get('return_arrival_time', 'TBD')}
+🏢 Airline: {details['airline']}
+✈️ Flight: {details['flight_number']}
+🔄 Stops: {details['stops']}{layover_section}
+⏱️ Total Duration: {details['duration']}
+🧳 Baggage: {details['baggage']}
+
+❓ Would you like me to search for more options or help you with booking?"""
+    else:
+        response = f"""✈️ FLIGHT FOUND! ✈️
 
 💰 Price: {details['currency']} {details['price']}
 🛫 Departure: {details['departure_time']}
 🛬 Arrival: {details['arrival_time']}
 🏢 Airline: {details['airline']}
 ✈️ Flight: {details['flight_number']}
-🔄 Stops: {details['stops']}
-⏱️ Duration: {details['duration']}
+🔄 Stops: {details['stops']}{layover_section}
+⏱️ Total Duration: {details['duration']}
 🧳 Baggage: {details['baggage']}
 
-❓ Would you like me to search for more options or help you with booking?"""
+❓ Would you like me to search for more options or help with booking?"""
     
     return response
 
