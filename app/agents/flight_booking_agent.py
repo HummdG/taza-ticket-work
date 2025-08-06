@@ -541,11 +541,9 @@ def search_flights(state: FlightBookingState) -> FlightBookingState:
         
         print(f"🔍 Searching {trip_type} flight: {state['departure_date']}")
         
-        # Determine which payload to use based on trip type
-        if trip_type == "round-trip" and state.get("return_date"):
-            return search_roundtrip_flights(state)
-        else:
-            return search_flights_original(state)
+        # Use the standard search for both one-way and round-trip
+        # The payload builder already handles round-trip when return_date is provided
+        return search_flights_original(state)
     
     elif search_type == "range":
         if not state.get("date_range_start") or not state.get("date_range_end"):
@@ -559,38 +557,7 @@ def search_flights(state: FlightBookingState) -> FlightBookingState:
         state["response_text"] = "Invalid search type specified."
         return state
 
-def search_roundtrip_flights(state: FlightBookingState) -> FlightBookingState:
-    """Search for round-trip flights using the enhanced payload"""
-    
-    try:
-        from ..payloads.flight_search import build_roundtrip_flight_payload
-        
-        payload = build_roundtrip_flight_payload(
-            from_city=str(state["from_city"]),
-            to_city=str(state["to_city"]),
-            departure_date=str(state["departure_date"]),
-            return_date=str(state["return_date"]),
-            passengers=state.get("passengers", 1),
-            passenger_age=state.get("passenger_age", 25)
-        )
-        
-        print(f"🔄 Making round-trip API call to Travelport...")
-        
-        headers = get_api_headers()
-        response = requests.post(CATALOG_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        
-        api_result = response.json()
-        state["raw_api_response"] = api_result
-        state["trip_type"] = "round-trip"
-        
-        print(f"✅ Round-trip search completed successfully")
-        
-    except Exception as e:
-        print(f"❌ Round-trip search error: {e}")
-        state["response_text"] = f"😔 Sorry, I couldn't search for round-trip flights. Error: {str(e)}"
-    
-    return state
+
 
 
 def extract_roundtrip_flight_details(flight_offering: Dict, state: FlightBookingState) -> Dict:
@@ -971,6 +938,10 @@ def analyze_bulk_search_results(state: FlightBookingState) -> FlightBookingState
 def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
     """Enhanced analysis supporting both single and round-trip flights"""
     
+    # Check if we have bulk search results first
+    if state.get("bulk_search_results"):
+        return analyze_bulk_search_results(state)
+    
     if not state.get("raw_api_response"):
         state["response_text"] = "No flight data available to analyze."
         return state
@@ -1013,12 +984,14 @@ def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
         if cheapest_flight:
             state["cheapest_flight"] = cheapest_flight
             
-            # Extract flight details based on trip type
+            # Extract flight details - the function already handles both one-way and round-trip
             trip_type = state.get("trip_type", "one-way")
             
             if trip_type == "round-trip":
+                # For round-trip, we need special handling
                 flight_details = extract_roundtrip_flight_details(cheapest_flight, state)
             else:
+                # For one-way flights
                 flight_details = extract_flight_details(cheapest_flight, state)
             
             state["response_text"] = format_flight_response(flight_details)
@@ -1029,6 +1002,8 @@ def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
             
     except Exception as e:
         print(f"❌ Error in enhanced flight analysis: {e}")
+        import traceback
+        traceback.print_exc()
         state["response_text"] = "😔 Error analyzing flight results."
     
     return state
