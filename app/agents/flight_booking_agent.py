@@ -29,7 +29,7 @@ llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0)
 
 
 def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
-    """Enhanced parsing to detect date ranges vs specific dates"""
+    """Enhanced parsing with better round-trip detection and duration calculation"""
     
     today = datetime.now().strftime("%Y-%m-%d")
     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -43,9 +43,7 @@ def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
     Today's date is {today}. Extract flight booking details from this user message: "{state['user_message']}"
     {context_section}
     
-    Determine if the user is asking for:
-    1. A specific date search
-    2. A date range search (e.g., "between 15th to 20th August", "cheapest in September", "best price next week")
+    Pay special attention to round-trip requests and duration-based bookings.
     
     Return ONLY a JSON object with these fields:
     {{
@@ -56,39 +54,41 @@ def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
         "passengers": "number of passengers (default 1)",
         "passenger_age": "age of passenger (default 25)",
         "search_type": "specific or range",
+        "trip_type": "one-way or round-trip",
+        "duration_days": "number of days for trip or null",
         "date_range_start": "YYYY-MM-DD format or null (start of range)",
         "date_range_end": "YYYY-MM-DD format or null (end of range)",
-        "range_description": "text description of the range or null",
-        "trip_type": "one-way or round-trip",
-        "duration_days": "number of days for trip or null"
+        "range_description": "text description of the range or null"
     }}
     
-    Rules for date parsing:
-    - Today is {today}
-    - Use standard 3-letter IATA airport codes (ATH=Athens, ISB=Islamabad)
-    - For date ranges like "between 15th to 20th August", "from 15th to 20th August":
-      - Set search_type to "range"
-      - Set date_range_start and date_range_end appropriately
-      - Set departure_date to null
-    - For return flights, always extract return_date if mentioned
-    - "staying for X days" with departure Aug 15 = return date calculated
-    - August 2025 = 2025-08-01 to 2025-08-31
-    - "between 15th to 20th August" = 2025-08-15 to 2025-08-20
+    Rules for round-trip detection and duration calculation:
+    - "Round trip", "return trip", "coming back", "for X days" = trip_type: "round-trip"
+    - "leaving tomorrow for 5 days" = departure: tomorrow, return: tomorrow + 5 days, trip_type: "round-trip"
+    - "going for a week" = departure + 7 days for return
+    - Always calculate return_date when trip_type is "round-trip" and duration_days is provided
+    - Today is {today}, tomorrow is {tomorrow}
+    - Use standard 3-letter IATA codes (KHI=Karachi, DXB=Dubai)
+    
+    Duration calculation examples:
+    - "leaving tomorrow for 5 days" → departure: {tomorrow}, return: {(datetime.now() + timedelta(days=6)).strftime("%Y-%m-%d")}
+    - "round trip for a week" → return date = departure + 7 days
+    - "going for 3 days" with departure Aug 7 → return Aug 10
     
     Examples:
-    "ticket from Athens to Islamabad between 15th to 20th August" → 
+    "Round trip from Karachi to Dubai leaving tomorrow for 5 days" → 
     {{
-        "from_city": "ATH", 
-        "to_city": "ISB", 
-        "search_type": "range", 
-        "date_range_start": "2025-08-15", 
-        "date_range_end": "2025-08-20",
-        "range_description": "between 15th to 20th August"
+        "from_city": "KHI", 
+        "to_city": "DXB", 
+        "departure_date": "{tomorrow}",
+        "return_date": "{(datetime.now() + timedelta(days=6)).strftime("%Y-%m-%d")}",
+        "trip_type": "round-trip",
+        "duration_days": 5,
+        "search_type": "specific"
     }}
     """
     
     try:
-        print(f"🤖 Enhanced parsing for: {state['user_message']}")
+        print(f"🤖 Enhanced round-trip parsing for: {state['user_message']}")
         response = llm.invoke([HumanMessage(content=parsing_prompt)])
         content = response.content if isinstance(response.content, str) else str(response.content)
         
@@ -102,25 +102,21 @@ def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
         
         parsed_data = json.loads(content)
         
-        # Enhanced validation for date ranges
-        if parsed_data.get("search_type") == "range":
-            if not parsed_data.get("date_range_start") or not parsed_data.get("date_range_end"):
-                print("⚠️ Date range detected but dates missing, trying to extract manually")
-                # Try manual extraction as fallback
-                manual_dates = extract_date_range_manually(state['user_message'])
-                if manual_dates:
-                    parsed_data.update(manual_dates)
-        
-        # Enhanced return date calculation
-        if parsed_data.get("duration_days") and parsed_data.get("departure_date") and not parsed_data.get("return_date"):
-            try:
-                dep_date = datetime.strptime(parsed_data["departure_date"], "%Y-%m-%d")
-                return_date = dep_date + timedelta(days=int(parsed_data["duration_days"]))
-                parsed_data["return_date"] = return_date.strftime("%Y-%m-%d")
-                parsed_data["trip_type"] = "round-trip"
-                print(f"✅ Calculated return date: {parsed_data['return_date']}")
-            except Exception as e:
-                print(f"⚠️ Error calculating return date: {e}")
+        # Enhanced return date calculation for round-trips
+        if parsed_data.get("trip_type") == "round-trip":
+            if parsed_data.get("duration_days") and parsed_data.get("departure_date") and not parsed_data.get("return_date"):
+                try:
+                    dep_date = datetime.strptime(parsed_data["departure_date"], "%Y-%m-%d")
+                    return_date = dep_date + timedelta(days=int(parsed_data["duration_days"]))
+                    parsed_data["return_date"] = return_date.strftime("%Y-%m-%d")
+                    print(f"✅ Calculated return date: {parsed_data['return_date']} (departure + {parsed_data['duration_days']} days)")
+                except Exception as e:
+                    print(f"⚠️ Error calculating return date: {e}")
+            
+            # Ensure search_type is specific for round-trips with exact dates
+            if parsed_data.get("departure_date") and parsed_data.get("return_date"):
+                parsed_data["search_type"] = "specific"
+                print(f"✅ Round-trip detected: {parsed_data['departure_date']} to {parsed_data['return_date']}")
         
         # Update state with parsed information
         state.update({
@@ -131,11 +127,11 @@ def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
             "passengers": parsed_data.get("passengers", 1),
             "passenger_age": parsed_data.get("passenger_age", 25),
             "search_type": parsed_data.get("search_type", "specific"),
+            "trip_type": parsed_data.get("trip_type", "one-way"),
+            "duration_days": parsed_data.get("duration_days"),
             "date_range_start": parsed_data.get("date_range_start"),
             "date_range_end": parsed_data.get("date_range_end"),
-            "range_description": parsed_data.get("range_description"),
-            "trip_type": parsed_data.get("trip_type", "one-way"),
-            "duration_days": parsed_data.get("duration_days")
+            "range_description": parsed_data.get("range_description")
         })
         
         print(f"✅ Enhanced parsing result: {parsed_data}")
@@ -145,7 +141,6 @@ def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
         state["response_text"] = "😅 I couldn't understand your flight request. Please provide details like: from city, to city, and travel dates."
     
     return state
-
 
 # Add this helper function
 def extract_date_range_manually(message: str) -> dict:
@@ -525,7 +520,7 @@ def find_cheapest_flight_original(state: FlightBookingState) -> FlightBookingSta
 
 
 def search_flights(state: FlightBookingState) -> FlightBookingState:
-    """Enhanced flight search supporting both one-way and round-trip flights"""
+    """Enhanced flight search ensuring proper round-trip API calls"""
     
     if not state.get("from_city") or not state.get("to_city"):
         state["response_text"] = "I need more information. Please specify: departure city and destination city."
@@ -534,16 +529,48 @@ def search_flights(state: FlightBookingState) -> FlightBookingState:
     search_type = state.get("search_type", "specific")
     trip_type = state.get("trip_type", "one-way")
     
+    print(f"🔍 Search type: {search_type}, Trip type: {trip_type}")
+    print(f"🔍 From: {state.get('from_city')}, To: {state.get('to_city')}")
+    print(f"🔍 Departure: {state.get('departure_date')}, Return: {state.get('return_date')}")
+    
     if search_type == "specific":
         if not state.get("departure_date"):
             state["response_text"] = "I need a departure date for your flight search."
             return state
         
-        print(f"🔍 Searching {trip_type} flight: {state['departure_date']}")
+        # For round-trip flights, ensure we have a return date
+        if trip_type == "round-trip" and not state.get("return_date"):
+            state["response_text"] = "I need a return date for your round-trip flight search."
+            return state
         
-        # Use the standard search for both one-way and round-trip
-        # The payload builder already handles round-trip when return_date is provided
-        return search_flights_original(state)
+        print(f"🔍 Searching {trip_type} flight with proper API call")
+        
+        try:
+            # Build API payload - this already handles round-trip when return_date is provided
+            payload = build_flight_search_payload(
+                from_city=str(state["from_city"]),
+                to_city=str(state["to_city"]),
+                departure_date=str(state["departure_date"]),
+                return_date=state.get("return_date"),  # This is key for round-trip
+                passengers=state.get("passengers", 1),
+                passenger_age=state.get("passenger_age", 25)
+            )
+            
+            print(f"✅ Built payload with return_date: {state.get('return_date')}")
+            
+            # Make API call
+            headers = get_api_headers()
+            response = requests.post(CATALOG_URL, headers=headers, json=payload)
+            response.raise_for_status()
+            
+            api_result = response.json()
+            state["raw_api_response"] = api_result
+            
+            print(f"✅ API call completed for {trip_type}")
+            
+        except Exception as e:
+            print(f"❌ Flight search error: {e}")
+            state["response_text"] = f"😔 Sorry, I couldn't search for flights. Error: {str(e)}"
     
     elif search_type == "range":
         if not state.get("date_range_start") or not state.get("date_range_end"):
@@ -556,6 +583,9 @@ def search_flights(state: FlightBookingState) -> FlightBookingState:
     else:
         state["response_text"] = "Invalid search type specified."
         return state
+    
+    return state
+
 
 
 
@@ -936,7 +966,7 @@ def analyze_bulk_search_results(state: FlightBookingState) -> FlightBookingState
 
 
 def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
-    """Enhanced analysis supporting both single and round-trip flights"""
+    """Enhanced analysis with proper round-trip detection and formatting"""
     
     # Check if we have bulk search results first
     if state.get("bulk_search_results"):
@@ -984,14 +1014,17 @@ def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
         if cheapest_flight:
             state["cheapest_flight"] = cheapest_flight
             
-            # Extract flight details - the function already handles both one-way and round-trip
+            # IMPORTANT: Check trip type to determine which extraction function to use
             trip_type = state.get("trip_type", "one-way")
+            has_return_date = bool(state.get("return_date"))
             
-            if trip_type == "round-trip":
-                # For round-trip, we need special handling
+            print(f"🔍 Trip type: {trip_type}, Has return date: {has_return_date}")
+            
+            if trip_type == "round-trip" or has_return_date:
+                print(f"✅ Using round-trip extraction for {trip_type}")
                 flight_details = extract_roundtrip_flight_details(cheapest_flight, state)
             else:
-                # For one-way flights
+                print(f"✅ Using one-way extraction for {trip_type}")
                 flight_details = extract_flight_details(cheapest_flight, state)
             
             state["response_text"] = format_flight_response(flight_details)
@@ -1582,12 +1615,18 @@ def format_flight_datetime(date_str: str, time_str: str, location: str = "", ter
 
 
 def format_flight_response(details: Dict) -> str:
-    """Enhanced flight response formatting for both one-way and round-trip flights"""
+    """Enhanced flight response formatting with proper round-trip detection"""
     
     trip_type = details.get('trip_type', 'one-way')
     
-    if trip_type == "round-trip":
+    # Check if we have round-trip details (both outbound and return info)
+    has_outbound = any(key.startswith('outbound_') for key in details.keys())
+    has_return = any(key.startswith('return_') for key in details.keys())
+    
+    if trip_type == "round-trip" or (has_outbound and has_return):
         # Format round-trip response
+        print(f"🔄 Formatting round-trip response with outbound: {has_outbound}, return: {has_return}")
+        
         outbound_layover_section = ""
         if details.get("outbound_layover_details"):
             outbound_layover_section = "\n🔄 Outbound Layovers:"
@@ -1624,9 +1663,13 @@ def format_flight_response(details: Dict) -> str:
 ⏰ Total Trip Duration: {details.get('total_duration', 'N/A')}
 
 ❓ Would you like me to search for more options or help you with booking?"""
+        
+        return response
     
     else:
-        # FIXED: One-way flight formatting (no recursion)
+        # One-way flight formatting
+        print(f"➡️ Formatting one-way response")
+        
         layover_section = ""
         if details.get("layover_details"):
             layover_section = "\n🔄 Layovers:"
@@ -1645,8 +1688,8 @@ def format_flight_response(details: Dict) -> str:
 🧳 Baggage: {details['baggage']}
 
 ❓ Would you like me to search for more options or help you with booking?"""
-    
-    return response
+        
+        return response
 
 
 # Updated workflow decision functions
