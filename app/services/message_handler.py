@@ -217,66 +217,46 @@ secure_tazaticket_s3 = SecureTazaTicketS3Handler()
 
 def detect_language(text: str) -> str:
     """
-    Enhanced language detection with better Urdu support
+    Robust language detection prioritizing script and reliable detection.
+    - If Arabic script present → trust langdetect result ('ar' or 'ur').
+    - If Devanagari script present → 'hi'.
+    - Else → use langdetect on raw text (no keyword heuristics to avoid false positives).
     """
     try:
-        # Clean text for better detection
-        cleaned_text = text.strip().lower()
-        
-        # Skip very short texts
+        import re
+        cleaned_text = (text or "").strip()
+
         if len(cleaned_text) < 10:
-            return 'en'  # Default to English for short texts
-            
-        # Urdu-specific keywords and patterns
-        urdu_indicators = [
-            'aap', 'hain', 'hai', 'main', 'mein', 'ka', 'ki', 'ke', 'ko', 'se',
-            'ticket', 'flight', 'safar', 'jaana', 'aana', 'chahiye', 'chahta',
-            'karna', 'karni', 'waqt', 'samay', 'din', 'mahina', 'saal',
-            'lahore', 'karachi', 'islamabad', 'pakistan', 'salam', 'assalam'
-        ]
-        
-        # Arabic-specific indicators
-        arabic_indicators = [
-            'سلام', 'مرحبا', 'شكرا', 'من', 'إلى', 'في', 'هذا', 'ذلك',
-            'طيران', 'رحلة', 'تذكرة', 'سفر'
-        ]
-        
-        # Hindi-specific indicators (different from Urdu)
-        hindi_indicators = [
-            'namaste', 'dhanyawad', 'kripaya', 'prasanna', 'vyakti',
-            'hindi', 'bharat', 'desh'
-        ]
-        
-        # Check for Urdu indicators first
-        urdu_count = sum(1 for word in urdu_indicators if word in cleaned_text)
-        arabic_count = sum(1 for word in arabic_indicators if word in cleaned_text)
-        hindi_count = sum(1 for word in hindi_indicators if word in cleaned_text)
-        
-        # Use keyword-based detection for better accuracy
-        if urdu_count >= 2:
-            print(f"🇵🇰 Detected Urdu based on keywords: {urdu_count} matches")
-            return 'ur'
-        elif arabic_count >= 1:
-            print(f"🇸🇦 Detected Arabic based on keywords: {arabic_count} matches")
-            return 'ar'
-        elif hindi_count >= 2:
-            print(f"🇮🇳 Detected Hindi based on keywords: {hindi_count} matches")
+            return 'en'
+
+        # Script checks
+        has_arabic = bool(re.search(r"[\u0600-\u06FF]", cleaned_text))  # Arabic script (covers Urdu/Arabic)
+        has_devanagari = bool(re.search(r"[\u0900-\u097F]", cleaned_text))  # Hindi script
+
+        if has_devanagari:
+            print("🇮🇳 Detected Devanagari script → hi")
             return 'hi'
-        
-        # Fallback to langdetect with post-processing
+
+        # Use langdetect for Arabic-script and general cases
         detected_lang = detect(cleaned_text)
-        
-        # Post-process common misdetections
-        if detected_lang == 'hi' and urdu_count > 0:
-            print(f"🔄 Correcting Hindi→Urdu detection (Urdu keywords found)")
-            detected_lang = 'ur'
-        
+
+        if has_arabic:
+            print(f"📝 Arabic script present; trusting detector: {detected_lang}")
+            # langdetect may return 'ur' or 'ar'; both acceptable
+            if detected_lang in ['ar', 'ur']:
+                print(f"🌐 Final detected language: {detected_lang} for text: '{text[:50]}...'")
+                return detected_lang
+            # If Arabic script but detector returns other, default to 'ur'
+            print("🔄 Overriding to 'ur' due to Arabic script")
+            return 'ur'
+
+        # For Latin/other scripts, rely solely on langdetect
         print(f"🌐 Final detected language: {detected_lang} for text: '{text[:50]}...'")
         return detected_lang
-        
+
     except Exception as e:
         print(f"⚠️ Language detection failed: {e}")
-        return 'en'  # Default to English
+        return 'en'
 
 
 def generate_voice_response(text: str, language: str = 'en', user_id: str = "unknown") -> Optional[str]:
