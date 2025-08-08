@@ -300,9 +300,28 @@ def generate_voice_response(text: str, language: str = 'en', user_id: str = "unk
         natural_speech_text = format_flight_for_speech(text, language)
         print(f"🗣️ Natural speech: '{natural_speech_text[:100]}...'")
         
-        # Step 2: Generate speech using OpenAI Chat Completions with audio output (female voice)
-        # Chat Completions will respond in the user's language (no external translation step)
-        final_text = natural_speech_text
+        # Step 2: Use LangChain ChatOpenAI to paraphrase into a natural WhatsApp voice-note style in the user's language
+        def polish_spoken_text_via_langchain_llm(raw_text: str, lang: str) -> str:
+            try:
+                style_llm = ChatOpenAI(model=os.getenv("OPENAI_SPOKEN_TEXT_MODEL", "gpt-4o-mini"), temperature=0.9)
+                sys_prompt = (
+                    "You rewrite text into a short, human voice-note style in the user's language (" + lang + "). "
+                    "Be warm, natural, and conversational. Vary sentence length, use small fillers/colloquialisms appropriate to the language. "
+                    "Keep it concise (<= 25 seconds when spoken). Preserve all key information and numbers."
+                )
+                result = style_llm.invoke([
+                    HumanMessage(content=[
+                        {"type": "text", "text": sys_prompt},
+                        {"type": "text", "text": raw_text},
+                    ])
+                ])
+                content = result.content if isinstance(result.content, str) else str(result.content)
+                return content.strip() or raw_text
+            except Exception as e:
+                print(f"⚠️ Spoken text polishing failed: {e}")
+                return raw_text
+
+        final_text = polish_spoken_text_via_langchain_llm(natural_speech_text, language)
         voice_file_path = generate_voice_response_via_chat_completion(final_text, language, user_id)
         
         if voice_file_path:
@@ -324,12 +343,11 @@ def generate_voice_response_via_chat_completion(text: str, language: str = 'en',
     """
     try:
         import base64
-        # Initialize via LangChain
+        from openai import OpenAI
         audio_model = os.getenv("OPENAI_AUDIO_MODEL", "gpt-4o-audio-preview")
-        llm = ChatOpenAI(model=audio_model, temperature=0.7)
-        openai_client = llm.client  # underlying OpenAI client
+        openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     except Exception as e:
-        print(f"❌ Failed to init ChatOpenAI/OpenAI client: {e}")
+        print(f"❌ Failed to init OpenAI client: {e}")
         return None
 
     try:
@@ -345,17 +363,26 @@ def generate_voice_response_via_chat_completion(text: str, language: str = 'en',
             model=audio_model,
             modalities=["text", "audio"],
             audio={"voice": target_voice, "format": "mp3"},
+            temperature=0.7,
             messages=[
-                {"role": "system", "content": (
-                    "You are TazaTicket's voice responder. "
-                    "Speak naturally in a friendly, helpful FEMALE voice. "
-                    "Always respond in the user's language, which is: '" + language + "'. "
-                    "Make minor adjustments for natural speech, but keep meaning."
-                )},
-                {"role": "user", "content": (
-                    "Please read this for the user in their language as a natural voice response: \n\n" + cleaned_text
-                )}
-            ]
+                {
+                    "role": "system",
+                    "content": (
+                        "You are TazaTicket's human-sounding travel assistant voice. "
+                        "Always speak in the user's language (" + language + ") with a warm, friendly FEMALE voice. "
+                        "Paraphrase the input to sound natural and conversational: vary sentence length, use contractions/colloquialisms appropriate to the language, "
+                        "add brief connectors (for example, 'achha', 'dekhein', 'theek hai' in Urdu; 'right then', 'okay' in English), and keep the tone empathetic and helpful. "
+                        "Read times and dates like a person would. Do not list bullet points; keep it flowing like a short WhatsApp voice note. "
+                        "Do not add facts not present in the text. Keep under 25 seconds if possible."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Please deliver this as a natural voice reply for WhatsApp in the user's language: \n\n" + cleaned_text
+                    ),
+                },
+            ],
         )
 
         # Extract base64 audio from various possible response shapes for compatibility

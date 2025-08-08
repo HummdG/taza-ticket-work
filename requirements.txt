@@ -9,7 +9,7 @@ pydantic==2.5.0
 python-multipart==0.0.6
 twilio==8.10.0
 typing-extensions
-openai
+openai>=1.51.0
 langchain-google-genai 
 twilio==8.10.0 
 boto3>=1.34.0
