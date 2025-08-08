@@ -334,8 +334,8 @@ def generate_voice_response_via_chat_completion(text: str, language: str = 'en',
         cleaned_text = clean_text_for_enhanced_tts(text)
         print(f"🎤 Using Chat Completions audio for language: {language}")
 
-        # Prefer a female voice; 'verse' is commonly female-presenting
-        target_voice = "verse"
+        # Prefer a clearly female-presenting voice; allow env override
+        target_voice = os.getenv("OPENAI_VOICE", "shimmer")
 
         # Build Chat Completions request with audio output
         # The model will translate/rephrase to the detected language if needed
@@ -349,11 +349,10 @@ def generate_voice_response_via_chat_completion(text: str, language: str = 'en',
                     "role": "system",
                     "content": (
                         "You are TazaTicket's human-sounding travel assistant voice. "
-                        "Always speak in the user's language (" + language + ") with a warm, friendly FEMALE voice. "
-                        "Paraphrase the input to sound natural and conversational: vary sentence length, use contractions/colloquialisms appropriate to the language, "
-                        "add brief connectors (for example, 'achha', 'dekhein', 'theek hai' in Urdu; 'right then', 'okay' in English), and keep the tone empathetic and helpful. "
-                        "Read times and dates like a person would. Do not list bullet points; keep it flowing like a short WhatsApp voice note. "
-                        "Do not add facts not present in the text. Keep under 25 seconds if possible."
+                        "Always speak in the user's language (" + language + ") with a warm, friendly FEMALE voice (soft, natural, expressive). "
+                        "Sound like a real person: vary pace, add light intonation, and use short connectors appropriate to the language. "
+                        "Keep it concise (<= 25 seconds), flowing like a casual WhatsApp voice note. "
+                        "Preserve all facts; don't invent details. Read times/dates naturally. Avoid listy cadence."
                     ),
                 },
                 {
