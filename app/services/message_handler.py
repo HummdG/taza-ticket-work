@@ -12,6 +12,7 @@ from botocore.exceptions import ClientError, NoCredentialsError
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 from langdetect import detect, DetectorFactory
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from ..models.schemas import FlightBookingState
 from ..agents.flight_booking_agent import flight_booking_agent
@@ -21,7 +22,7 @@ from ..services.memory_service import memory_manager
 from ..services.flight_info_collector import flight_collector
 from dotenv import load_dotenv
 from ..services.public_s3_handler import public_tazaticket_s3
-from .aws_services import aws_translation_service, aws_polly_service, translate_to_language, generate_polly_speech
+# Removed AWS Translate/Polly TTS usage; Chat Completions will handle language & audio
 from .speech_formatter import format_flight_for_speech
 
 DetectorFactory.seed = 0
@@ -38,23 +39,7 @@ except ImportError:
 # Set seed for consistent language detection
 DetectorFactory.seed = 0
 
-# Language mapping for TTS voices
-LANGUAGE_VOICE_MAPPING = {
-    'en': 'alloy',      # English - default voice
-    'ur': 'nova',       # Urdu - closest supported voice
-    'ar': 'shimmer',    # Arabic
-    'hi': 'echo',       # Hindi - closest supported voice
-    'es': 'fable',      # Spanish
-    'fr': 'onyx',       # French
-    'de': 'alloy',      # German
-    'it': 'nova',       # Italian
-    'pt': 'shimmer',    # Portuguese
-    'ru': 'echo',       # Russian
-    'ja': 'fable',      # Japanese
-    'ko': 'onyx',       # Korean
-    'zh': 'alloy',      # Chinese
-    'default': 'alloy'  # Fallback
-}
+# We will always use a female voice via Chat Completions (e.g., "verse")
 
 
 class SecureTazaTicketS3Handler:
@@ -232,13 +217,7 @@ secure_tazaticket_s3 = SecureTazaTicketS3Handler()
 
 def detect_language(text: str) -> str:
     """
-    Detect the language of the given text
-    
-    Args:
-        text: Text to analyze
-        
-    Returns:
-        str: ISO language code (e.g., 'en', 'ur', 'ar')
+    Enhanced language detection with better Urdu support
     """
     try:
         # Clean text for better detection
@@ -248,8 +227,51 @@ def detect_language(text: str) -> str:
         if len(cleaned_text) < 10:
             return 'en'  # Default to English for short texts
             
+        # Urdu-specific keywords and patterns
+        urdu_indicators = [
+            'aap', 'hain', 'hai', 'main', 'mein', 'ka', 'ki', 'ke', 'ko', 'se',
+            'ticket', 'flight', 'safar', 'jaana', 'aana', 'chahiye', 'chahta',
+            'karna', 'karni', 'waqt', 'samay', 'din', 'mahina', 'saal',
+            'lahore', 'karachi', 'islamabad', 'pakistan', 'salam', 'assalam'
+        ]
+        
+        # Arabic-specific indicators
+        arabic_indicators = [
+            'سلام', 'مرحبا', 'شكرا', 'من', 'إلى', 'في', 'هذا', 'ذلك',
+            'طيران', 'رحلة', 'تذكرة', 'سفر'
+        ]
+        
+        # Hindi-specific indicators (different from Urdu)
+        hindi_indicators = [
+            'namaste', 'dhanyawad', 'kripaya', 'prasanna', 'vyakti',
+            'hindi', 'bharat', 'desh'
+        ]
+        
+        # Check for Urdu indicators first
+        urdu_count = sum(1 for word in urdu_indicators if word in cleaned_text)
+        arabic_count = sum(1 for word in arabic_indicators if word in cleaned_text)
+        hindi_count = sum(1 for word in hindi_indicators if word in cleaned_text)
+        
+        # Use keyword-based detection for better accuracy
+        if urdu_count >= 2:
+            print(f"🇵🇰 Detected Urdu based on keywords: {urdu_count} matches")
+            return 'ur'
+        elif arabic_count >= 1:
+            print(f"🇸🇦 Detected Arabic based on keywords: {arabic_count} matches")
+            return 'ar'
+        elif hindi_count >= 2:
+            print(f"🇮🇳 Detected Hindi based on keywords: {hindi_count} matches")
+            return 'hi'
+        
+        # Fallback to langdetect with post-processing
         detected_lang = detect(cleaned_text)
-        print(f"🌐 Detected language: {detected_lang} for text: '{text[:50]}...'")
+        
+        # Post-process common misdetections
+        if detected_lang == 'hi' and urdu_count > 0:
+            print(f"🔄 Correcting Hindi→Urdu detection (Urdu keywords found)")
+            detected_lang = 'ur'
+        
+        print(f"🌐 Final detected language: {detected_lang} for text: '{text[:50]}...'")
         return detected_lang
         
     except Exception as e:
@@ -278,111 +300,95 @@ def generate_voice_response(text: str, language: str = 'en', user_id: str = "unk
         natural_speech_text = format_flight_for_speech(text, language)
         print(f"🗣️ Natural speech: '{natural_speech_text[:100]}...'")
         
-        # Step 2: Translate to target language if not English (keep AWS Translate)
+        # Step 2: Generate speech using OpenAI Chat Completions with audio output (female voice)
+        # Chat Completions will respond in the user's language (no external translation step)
         final_text = natural_speech_text
-        if language != 'en' and aws_translation_service.is_configured():
-            print(f"🌐 Translating natural speech to {language}...")
-            final_text = translate_to_language(natural_speech_text, language)
-            print(f"✅ Translated text: '{final_text[:100]}...'")
-        elif language != 'en':
-            print(f"⚠️ AWS Translate not available, using original text")
-        
-        # Step 3: Generate speech using OpenAI TTS (PRIMARY METHOD)
-        voice_file_path = generate_voice_response_openai_primary(final_text, language, user_id)
+        voice_file_path = generate_voice_response_via_chat_completion(final_text, language, user_id)
         
         if voice_file_path:
-            print(f"✅ OpenAI TTS voice response generated: {voice_file_path}")
+            print(f"✅ Chat Completions audio generated: {voice_file_path}")
             return voice_file_path
         else:
-            print(f"❌ OpenAI TTS speech generation failed")
-        
-        # Fallback: Use AWS Polly if OpenAI fails (optional fallback)
-        if aws_polly_service.is_configured():
-            print(f"🔄 Falling back to AWS Polly...")
-            polly_voice_file_path = generate_polly_speech(final_text, language, user_id)
-            
-            if polly_voice_file_path:
-                print(f"✅ AWS Polly fallback voice response generated: {polly_voice_file_path}")
-                return polly_voice_file_path
-            else:
-                print(f"❌ AWS Polly fallback also failed")
-        else:
-            print(f"⚠️ AWS Polly not available for fallback")
-        
-        return None
+            print(f"❌ Chat Completions audio generation failed")
+            return None
         
     except Exception as e:
         print(f"❌ Voice generation error: {e}")
         return None
 
 
-def generate_voice_response_openai_primary(text: str, language: str = 'en', user_id: str = "unknown") -> Optional[str]:
+def generate_voice_response_via_chat_completion(text: str, language: str = 'en', user_id: str = "unknown") -> Optional[str]:
     """
-    Primary voice response using OpenAI TTS with enhanced natural speech
+    Generate voice using OpenAI Chat Completions with audio output (female voice).
+    The model is instructed to speak in the user's language and produce natural audio.
     """
-    
-    # Import OpenAI
     try:
-        from openai import OpenAI
-        openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    except ImportError:
-        print("❌ OpenAI library not available")
-        return None
-    
-    if not openai_client:
-        print("❌ OpenAI client not available")
-        return None
-    
-    try:
-        print(f"🎤 Using OpenAI TTS for language: {language}")
-        
-        # Clean text for TTS (keep the enhanced cleaning from AWS services)
-        cleaned_text = clean_text_for_enhanced_tts(text)
-        
-        # Enhanced voice selection for OpenAI with better language mapping
-        voice_mapping = {
-            'en': 'alloy',      # English - natural and clear
-            'ur': 'nova',       # Urdu - use Nova (warm, engaging)
-            'ar': 'shimmer',    # Arabic - use Shimmer (warm, whispery) 
-            'hi': 'echo',       # Hindi - use Echo (boyish)
-            'es': 'fable',      # Spanish - use Fable (expressive)
-            'fr': 'onyx',       # French - use Onyx (deep, authoritative)
-            'de': 'alloy',      # German - use Alloy (neutral)
-            'it': 'nova',       # Italian - use Nova
-            'pt': 'shimmer',    # Portuguese - use Shimmer
-            'ru': 'echo',       # Russian - use Echo
-            'ja': 'fable',      # Japanese - use Fable
-            'ko': 'onyx',       # Korean - use Onyx
-            'zh': 'alloy',      # Chinese - use Alloy
-            'default': 'alloy'  # Fallback
-        }
-        
-        voice = voice_mapping.get(language, voice_mapping['default'])
-        print(f"🎵 Using OpenAI voice: {voice}")
-        
-        # Generate speech using OpenAI TTS with optimized settings
-        response = openai_client.audio.speech.create(
-            model="gpt-4o-mini-tts",  # Use high-definition model for better quality
-            voice=voice,
-            input=cleaned_text,
-            response_format="mp3",
-            speed=1  # Slightly slower for better clarity in multiple languages
-        )
-        
-        # Save to temporary file
-        temp_filename = f"openai_voice_{user_id}_{hash(cleaned_text) % 10000}.mp3"
-        temp_path = os.path.join(tempfile.gettempdir(), temp_filename)
-        
-        # Write audio data to file
-        with open(temp_path, 'wb') as f:
-            for chunk in response.iter_bytes():
-                f.write(chunk)
-        
-        print(f"✅ OpenAI TTS voice generated: {temp_path}")
-        return temp_path
-        
+        import base64
+        # Initialize via LangChain
+        audio_model = os.getenv("OPENAI_AUDIO_MODEL", "gpt-4o-audio-preview")
+        llm = ChatOpenAI(model=audio_model, temperature=0.7)
+        openai_client = llm.client  # underlying OpenAI client
     except Exception as e:
-        print(f"❌ OpenAI TTS error: {e}")
+        print(f"❌ Failed to init ChatOpenAI/OpenAI client: {e}")
+        return None
+
+    try:
+        cleaned_text = clean_text_for_enhanced_tts(text)
+        print(f"🎤 Using Chat Completions audio for language: {language}")
+
+        # Prefer a female voice; 'verse' is commonly female-presenting
+        target_voice = "verse"
+
+        # Build Chat Completions request with audio output
+        # The model will translate/rephrase to the detected language if needed
+        completion = openai_client.chat.completions.create(
+            model=audio_model,
+            modalities=["text", "audio"],
+            audio={"voice": target_voice, "format": "mp3"},
+            messages=[
+                {"role": "system", "content": (
+                    "You are TazaTicket's voice responder. "
+                    "Speak naturally in a friendly, helpful FEMALE voice. "
+                    "Always respond in the user's language, which is: '" + language + "'. "
+                    "Make minor adjustments for natural speech, but keep meaning."
+                )},
+                {"role": "user", "content": (
+                    "Please read this for the user in their language as a natural voice response: \n\n" + cleaned_text
+                )}
+            ]
+        )
+
+        # Extract base64 audio from various possible response shapes for compatibility
+        b64_audio = None
+        try:
+            b64_audio = completion.choices[0].message.audio.data  # new shape
+        except Exception:
+            pass
+        if b64_audio is None:
+            try:
+                parts = getattr(completion.choices[0].message, "content", []) or []
+                for p in parts:
+                    if isinstance(p, dict):
+                        audio_obj = p.get("audio") or p.get("output_audio")
+                        if isinstance(audio_obj, dict) and audio_obj.get("data"):
+                            b64_audio = audio_obj["data"]
+                            break
+            except Exception:
+                pass
+
+        if not b64_audio:
+            print("❌ No audio returned from Chat Completions")
+            return None
+
+        audio_bytes = base64.b64decode(b64_audio)
+        temp_filename = f"openai_chat_audio_{user_id}_{hash(cleaned_text) % 10000}.mp3"
+        temp_path = os.path.join(tempfile.gettempdir(), temp_filename)
+        with open(temp_path, "wb") as f:
+            f.write(audio_bytes)
+        print(f"✅ Chat Completions audio generated: {temp_path}")
+        return temp_path
+    except Exception as e:
+        print(f"❌ Chat Completions audio error: {e}")
         return None
 
 
@@ -474,12 +480,9 @@ def clean_text_for_enhanced_tts(text: str) -> str:
     return cleaned_text
 
 
-# Update the OpenAI fallback function name to avoid confusion
+# Backward-compatible wrapper name
 def generate_voice_response_openai_fallback(text: str, language: str = 'en', user_id: str = "unknown") -> Optional[str]:
-    """
-    Legacy fallback method - now just calls the primary OpenAI method
-    """
-    return generate_voice_response_openai_primary(text, language, user_id)
+    return generate_voice_response_via_chat_completion(text, language, user_id)
 
 def upload_voice_file_to_accessible_url(file_path: str, user_id: str = "unknown") -> Optional[str]:
     """
