@@ -1641,6 +1641,245 @@ def should_analyze_flights(state: FlightBookingState) -> str:
         return "end"
 
 
+def parse_human_duration_to_minutes(duration_text: str) -> Optional[int]:
+    """Parse human-readable durations like '7h 30m' or '12h' into minutes.
+    Returns None if parsing fails.
+    """
+    try:
+        import re
+        text = (duration_text or "").strip().lower()
+        if not text:
+            return None
+        hours = 0
+        minutes = 0
+        m_h = re.search(r"(\d+)\s*h", text)
+        m_m = re.search(r"(\d+)\s*m", text)
+        if m_h:
+            hours = int(m_h.group(1))
+        if m_m:
+            minutes = int(m_m.group(1))
+        total = hours * 60 + minutes
+        return total if total > 0 else None
+    except Exception:
+        return None
+
+
+def calculate_roundtrip_total_duration(outbound_details: Dict, return_details: Dict) -> str:
+    """Compute total trip duration by summing outbound and return durations.
+    Falls back gracefully if any piece is missing.
+    """
+    try:
+        out_text = outbound_details.get("outbound_duration") or outbound_details.get("duration") or ""
+        ret_text = return_details.get("return_duration") or return_details.get("duration") or ""
+        out_min = parse_human_duration_to_minutes(out_text) or 0
+        ret_min = parse_human_duration_to_minutes(ret_text) or 0
+        total = out_min + ret_min
+        return format_duration_human_readable(total) if total > 0 else "N/A"
+    except Exception:
+        return "N/A"
+
+
+def search_roundtrip_flights(state: FlightBookingState) -> FlightBookingState:
+    """Search round-trip flights (origin→destination and back).
+    Builds a payload with both departure and return dates and stores the API response in state.
+    """
+    try:
+        from_city = str(state["from_city"])
+        to_city = str(state["to_city"])
+        departure_date = str(state["departure_date"])  # YYYY-MM-DD
+        return_date = str(state.get("return_date"))
+        passengers = state.get("passengers", 1)
+        passenger_age = state.get("passenger_age", 25)
+
+        if not return_date:
+            state["response_text"] = "Return date is required for a round-trip search."
+            return state
+
+        # Build API payload (payload builder already supports return_date)
+        payload = build_flight_search_payload(
+            from_city=from_city,
+            to_city=to_city,
+            departure_date=departure_date,
+            return_date=return_date,
+            passengers=passengers,
+            passenger_age=passenger_age,
+        )
+
+        headers = get_api_headers()
+        response = requests.post(CATALOG_URL, headers=headers, json=payload)
+        response.raise_for_status()
+
+        api_result = response.json()
+        state["raw_api_response"] = api_result
+        print("✅ Round-trip API call completed")
+        return state
+
+    except Exception as e:
+        print(f"❌ Round-trip flight search error: {e}")
+        state["response_text"] = f"😔 Sorry, I couldn't search for round-trip flights. Error: {str(e)}"
+        return state
+
+
+def extract_flight_details(flight_offering: Dict, state: FlightBookingState, override_date: Optional[str] = None) -> Dict:
+    """Extract enhanced one-way journey details (price, times, airline, stops, layovers) from a single offering.
+    Uses ReferenceList in the raw API response to resolve flight segments and terms & conditions.
+    """
+    details: Dict[str, any] = {
+        "price": "N/A",
+        "currency": "EUR",
+        "departure_time": "N/A",
+        "arrival_time": "N/A",
+        "airline": "N/A",
+        "stops": "N/A",
+        "baggage": "Standard",
+        "duration": "N/A",
+        "flight_number": "N/A",
+        "layover_details": [],
+        "total_layover_time": "N/A",
+    }
+
+    try:
+        # 1) Find cheapest price within offering and capture refs/terms
+        cheapest_price = float("inf")
+        best_flight_refs: List[str] = []
+        best_currency = "EUR"
+        best_terms_ref: Optional[str] = None
+
+        for option in flight_offering.get("ProductBrandOptions", []):
+            flight_refs = option.get("flightRefs", [])
+            for brand in option.get("ProductBrandOffering", []):
+                best_price = brand.get("BestCombinablePrice", {})
+                if isinstance(best_price, dict) and best_price.get("TotalPrice") is not None:
+                    price = float(best_price["TotalPrice"])
+                    if price < cheapest_price:
+                        cheapest_price = price
+                        best_flight_refs = flight_refs
+                        details["price"] = str(best_price["TotalPrice"])
+                        currency_info = best_price.get("CurrencyCode", {})
+                        if isinstance(currency_info, dict):
+                            best_currency = currency_info.get("value", "EUR")
+                        details["currency"] = best_currency
+                        terms = brand.get("TermsAndConditions", {})
+                        if isinstance(terms, dict):
+                            best_terms_ref = terms.get("termsAndConditionsRef")
+
+        print(f"🔍 Best flight refs: {best_flight_refs}")
+        print(f"🔍 Best terms & conditions ref: {best_terms_ref}")
+
+        # 2) Resolve flight segments and terms from ReferenceList
+        api = state.get("raw_api_response", {})
+        reference_list = (
+            api.get("CatalogProductOfferingsResponse", {})
+            .get("ReferenceList", [])
+        )
+
+        flight_reference_list = None
+        terms_and_conditions_list = None
+        for ref_list in reference_list:
+            if ref_list.get("@type") == "ReferenceListFlight":
+                flight_reference_list = ref_list.get("Flight", [])
+            elif ref_list.get("@type") == "ReferenceListTermsAndConditions":
+                terms_and_conditions_list = ref_list.get("TermsAndConditions", [])
+
+        flight_segments: List[Dict] = []
+        airlines: set[str] = set()
+        flight_numbers: List[str] = []
+        total_duration_minutes = 0
+
+        if best_flight_refs and flight_reference_list:
+            for ref in best_flight_refs:
+                for flight in flight_reference_list:
+                    if flight.get("id") == ref:
+                        flight_segments.append(flight)
+                        carrier = flight.get("carrier", "")
+                        if carrier:
+                            airlines.add(get_airline_name(carrier))
+                        number = flight.get("number", "")
+                        if number:
+                            flight_numbers.append(f"{carrier}{number}")
+                        # ISO8601 PTxHxM
+                        dur = flight.get("duration", "")
+                        if dur:
+                            minutes = parse_iso_duration(dur)
+                            total_duration_minutes += minutes
+                        break
+
+        # Sort segments by departure chronology
+        flight_segments.sort(
+            key=lambda x: (
+                x.get("Departure", {}).get("date", ""),
+                x.get("Departure", {}).get("time", ""),
+            )
+        )
+
+        if flight_segments:
+            # Layovers
+            layover_info = calculate_layover_details(flight_segments)
+            details.update(layover_info)
+
+            # First departure
+            first_seg = flight_segments[0]
+            dep = first_seg.get("Departure", {})
+            dep_loc = dep.get("location", "")
+            dep_date = dep.get("date", "")
+            dep_time = dep.get("time", "")
+            dep_term = dep.get("terminal", "")
+            if dep_date and dep_time:
+                details["departure_time"] = format_flight_datetime(dep_date, dep_time, dep_loc, dep_term)
+
+            # Last arrival
+            last_seg = flight_segments[-1]
+            arr = last_seg.get("Arrival", {})
+            arr_loc = arr.get("location", "")
+            arr_date = arr.get("date", "")
+            arr_time = arr.get("time", "")
+            if arr_date and arr_time:
+                details["arrival_time"] = format_flight_datetime(arr_date, arr_time, arr_loc)
+
+            # Airlines
+            if airlines:
+                details["airline"] = ", ".join(airlines) if len(airlines) > 1 else list(airlines)[0]
+
+            # Stops
+            num_segments = len(flight_segments)
+            if num_segments == 1:
+                details["stops"] = "Direct flight"
+            else:
+                if details.get("layover_details"):
+                    layover_summary = ", ".join(
+                        f"{l['city']} ({l['duration']})" for l in details["layover_details"]
+                    )
+                    details["stops"] = f"{num_segments - 1} stop(s) via {layover_summary}"
+                else:
+                    details["stops"] = f"{num_segments - 1} stop(s)"
+
+            # Duration
+            total_travel = calculate_total_flight_duration(flight_segments)
+            if total_travel:
+                details["duration"] = total_travel
+            elif total_duration_minutes > 0:
+                hours = total_duration_minutes // 60
+                minutes = total_duration_minutes % 60
+                details["duration"] = f"{hours}h {minutes}m" if hours else f"{minutes}m"
+
+            # Flight numbers
+            if flight_numbers:
+                details["flight_number"] = ", ".join(flight_numbers)
+
+        # 3) Baggage
+        if best_terms_ref and terms_and_conditions_list:
+            bag = extract_baggage_allowance(best_terms_ref, terms_and_conditions_list)
+            if bag:
+                details["baggage"] = bag
+
+        print(f"✅ Enhanced one-way details extracted: {details}")
+        return details
+
+    except Exception as e:
+        print(f"❌ Error extracting flight details: {e}")
+        return details
+
+
 # Create the enhanced LangGraph workflow
 def create_flight_booking_agent():
     """Create and compile the enhanced LangGraph flight booking agent"""
