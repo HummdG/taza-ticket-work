@@ -1061,38 +1061,65 @@ def extract_roundtrip_flight_details(flight_offering: Dict, state: FlightBooking
 
 
 def split_roundtrip_segments(all_segments: List[Dict], origin: str, destination: str) -> Tuple[List[Dict], List[Dict]]:
-    """Split flight segments into outbound and return journeys"""
+    """Split flight segments into outbound (origin→destination) and return (destination→origin).
+    - Outbound includes ALL segments up to and including the first segment whose arrival is the destination.
+    - Return includes all remaining segments after that point.
+    - Falls back gracefully if destination is never reached by using a midpoint split.
+    """
     
-    outbound_segments = []
-    return_segments = []
+    outbound_segments: List[Dict] = []
+    return_segments: List[Dict] = []
     
     try:
-        # Simple approach: split based on dates and routes
-        mid_point = len(all_segments) // 2
+        if not all_segments:
+            return outbound_segments, return_segments
         
-        # More sophisticated splitting based on route direction
-        for i, segment in enumerate(all_segments):
-            departure_location = segment.get("Departure", {}).get("location", "")
-            arrival_location = segment.get("Arrival", {}).get("location", "")
+        # Ensure chronological order by departure timestamp
+        def dep_key(seg: Dict) -> Tuple[str, str]:
+            dep = seg.get("Departure", {})
+            return (dep.get("date", ""), dep.get("time", ""))
+        
+        segments = sorted(all_segments, key=dep_key)
+        
+        reached_destination = False
+        
+        for seg in segments:
+            dep_loc = seg.get("Departure", {}).get("location", "")
+            arr_loc = seg.get("Arrival", {}).get("location", "")
             
-            # If segment starts from origin area, it's likely outbound
-            if departure_location == origin or (arrival_location == destination and i < mid_point):
-                outbound_segments.append(segment)
+            if not reached_destination:
+                outbound_segments.append(seg)
+                # Mark the end of outbound when we first ARRIVE at the destination
+                if arr_loc == destination:
+                    reached_destination = True
             else:
-                return_segments.append(segment)
+                return_segments.append(seg)
         
-        # Fallback: split in half
-        if not outbound_segments or not return_segments:
-            outbound_segments = all_segments[:mid_point]
-            return_segments = all_segments[mid_point:]
-            
+        # Fallback: If we never reached the true destination in segments, split by middle
+        if not reached_destination:
+            mid_point = len(segments) // 2
+            outbound_segments = segments[:mid_point]
+            return_segments = segments[mid_point:]
+        
+        # Safety correction: ensure the first return departs from the destination when possible
+        if return_segments and outbound_segments:
+            # If the first return segment does not start at destination, move segments from outbound until it does
+            while (outbound_segments and
+                   return_segments and
+                   return_segments[0].get("Departure", {}).get("location", "") != destination):
+                return_segments.insert(0, outbound_segments.pop())
+                # Stop if outbound now ends exactly at destination
+                if outbound_segments and outbound_segments[-1].get("Arrival", {}).get("location", "") == destination:
+                    break
+        
+        print(f"✅ Split segments: {len(outbound_segments)} outbound, {len(return_segments)} return")
+        return outbound_segments, return_segments
+    
     except Exception as e:
         print(f"⚠️ Error splitting round-trip segments: {e}")
+        # Conservative fallback to midpoint
         mid_point = len(all_segments) // 2
-        outbound_segments = all_segments[:mid_point]
-        return_segments = all_segments[mid_point:]
-    
-    return outbound_segments, return_segments
+        return all_segments[:mid_point], all_segments[mid_point:]
 
 
 def process_flight_segments(segments: List[Dict], journey_type: str) -> Dict:
