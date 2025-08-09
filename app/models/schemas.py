@@ -30,6 +30,8 @@ class FlightBookingState(TypedDict):
     return_date: Optional[str]
     passengers: int
     passenger_age: int
+    # Explicitly track trip type to persist across workflow nodes
+    trip_type: Optional[str]  # "one-way" or "round-trip"
     raw_api_response: Optional[Dict[str, Any]]
     cheapest_flight: Optional[Dict[str, Any]]
     response_text: str

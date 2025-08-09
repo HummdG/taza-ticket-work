@@ -341,7 +341,8 @@ def search_flights(state: FlightBookingState) -> FlightBookingState:
         return state
     
     search_type = state.get("search_type", "specific")
-    trip_type = state.get("trip_type", "one-way")
+    # Derive trip type robustly: if a return_date is present, treat as round-trip regardless of stored flag
+    trip_type = "round-trip" if state.get("return_date") else state.get("trip_type", "one-way")
     
     if search_type == "specific":
         if not state.get("departure_date"):
@@ -351,7 +352,7 @@ def search_flights(state: FlightBookingState) -> FlightBookingState:
         print(f"🔍 Searching {trip_type} flight: {state['departure_date']}")
         
         # Determine which payload to use based on trip type
-        if trip_type == "round-trip" and state.get("return_date"):
+        if state.get("return_date"):
             return search_roundtrip_flights(state)
         else:
             return search_flights_original(state)
@@ -429,21 +430,21 @@ def analyze_bulk_search_results(state: FlightBookingState) -> FlightBookingState
             range_desc = state.get("range_description", f"{state.get('date_range_start')} to {state.get('date_range_end')}")
             
             response = f"""✈️ CHEAPEST FLIGHT FOUND! ✈️
-🗓️ Best date in {range_desc}: {best_date}
-
-💰 Price: {flight_details['currency']} {flight_details['price']}
-🛫 Departure: {flight_details['departure_time']}
-🛬 Arrival: {flight_details['arrival_time']}
-🏢 Airline: {flight_details['airline']}
-🔄 Stops: {flight_details['stops']}
-🧳 Baggage: {flight_details['baggage']}
-
-📊 Searched {len(bulk_results)} dates to find you the best price!
-
-❓ Would you like me to search for more options or help you with booking?"""
-            
+ 🗓️ Best date in {range_desc}: {best_date}
+ 
+ 💰 Price: {flight_details['currency']} {flight_details['price']}
+ 🛫 Departure: {flight_details['departure_time']}
+ 🛬 Arrival: {flight_details['arrival_time']}
+ 🏢 Airline: {flight_details['airline']}
+ 🔄 Stops: {flight_details['stops']}
+ 🧳 Baggage: {flight_details['baggage']}
+ 
+ 📊 Searched {len(bulk_results)} dates to find you the best price!
+ 
+ ❓ Would you like me to search for more options or help you with booking?"""
+             
             state["response_text"] = response
-            
+             
             print(f"✅ Found global cheapest flight: ${global_lowest_price} on {best_date}")
         else:
             state["response_text"] = "✈️ I found flights but couldn't determine the best pricing across the date range."
@@ -453,6 +454,42 @@ def analyze_bulk_search_results(state: FlightBookingState) -> FlightBookingState
         state["response_text"] = "😔 Error analyzing search results across the date range."
     
     return state
+
+
+# --- Helpers for city/airport code normalization ---
+def expand_city_to_airports(code: str) -> set:
+    """Return a set of airport codes represented by a city code. Includes the code itself.
+    Example: LON -> {LHR, LGW, LCY, LTN, STN, SEN}
+    """
+    code_upper = (code or "").upper()
+    mapping = {
+        "LON": {"LHR", "LGW", "LCY", "LTN", "STN", "SEN"},
+        "NYC": {"JFK", "LGA", "EWR"},
+        "PAR": {"CDG", "ORY", "BVA"},
+        "ROM": {"FCO", "CIA"},
+        "TYO": {"HND", "NRT"},
+        "CHI": {"ORD", "MDW"},
+        "WAS": {"IAD", "DCA", "BWI"},
+        "MOW": {"SVO", "DME", "VKO"},
+        "SAO": {"GRU", "CGH", "VCP"},
+        "RIO": {"GIG", "SDU"},
+    }
+    # Include the original code as an airport itself
+    airports = set(mapping.get(code_upper, set()))
+    airports.add(code_upper)
+    return airports
+
+
+def codes_match(candidate_airport: str, requested_code: str) -> bool:
+    """True if candidate_airport matches the requested_code, handling city codes.
+    Both inputs are 3-letter codes. We treat a match if the candidate equals the
+    requested code, or the candidate is one of the airports represented by the requested city code.
+    """
+    if not candidate_airport or not requested_code:
+        return False
+    cand = candidate_airport.upper()
+    req_set = expand_city_to_airports(requested_code)
+    return cand in req_set
 
 
 def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
@@ -481,7 +518,7 @@ def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
 
         from_city = str(state.get("from_city", ""))
         to_city = str(state.get("to_city", ""))
-        trip_type = state.get("trip_type", "one-way")
+        trip_type = "round-trip" if state.get("return_date") else state.get("trip_type", "one-way")
         has_return_date = bool(state.get("return_date"))
 
         def offering_min_price(offering: Dict) -> Optional[float]:
@@ -501,9 +538,9 @@ def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
         for off in offerings:
             dep = off.get("Departure")
             arr = off.get("Arrival")
-            if dep == from_city and arr == to_city:
+            if codes_match(dep, from_city) and codes_match(arr, to_city):
                 outbound_candidates.append(off)
-            elif dep == to_city and arr == from_city:
+            elif codes_match(dep, to_city) and codes_match(arr, from_city):
                 return_candidates.append(off)
 
         print(f"🔍 Directional offerings: outbound={len(outbound_candidates)}, return={len(return_candidates)}")
@@ -654,7 +691,8 @@ def extract_journey_details_from_refs(flight_refs: List[str], terms_ref: Optiona
         "baggage": "Standard",
         "duration": "N/A",
         "flight_number": "N/A",
-        "layover_details": []
+        "layover_details": [],
+        "total_layover_time": "N/A",
     }
     
     try:
