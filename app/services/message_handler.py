@@ -287,7 +287,8 @@ def generate_voice_response(text: str, language: str = 'en', user_id: str = "unk
                 sys_prompt = (
                     "You rewrite text into a short, human voice-note style in the user's language (" + lang + "). "
                     "Be warm, natural, and conversational. Vary sentence length, use small fillers/colloquialisms appropriate to the language. "
-                    "Keep it concise (<= 25 seconds when spoken). Preserve all key information and numbers."
+                    "Keep it concise (<= 35 seconds when spoken). Preserve all key information and numbers. "
+                    "If the text describes a round‑trip (mentions Outbound and Return or RETURN FLIGHT), you MUST include both legs explicitly. Do not omit the return leg."
                 )
                 result = style_llm.invoke([
                     HumanMessage(content=[
@@ -301,7 +302,13 @@ def generate_voice_response(text: str, language: str = 'en', user_id: str = "unk
                 print(f"⚠️ Spoken text polishing failed: {e}")
                 return raw_text
 
-        final_text = polish_spoken_text_via_langchain_llm(natural_speech_text, language)
+        # Preserve both legs verbatim for round-trips to avoid LLM dropping the return leg
+        is_roundtrip_text = any(k in natural_speech_text.lower() for k in ["return flight", "return:", "round-trip", "round trip"])
+        if is_roundtrip_text:
+            final_text = natural_speech_text
+        else:
+            final_text = polish_spoken_text_via_langchain_llm(natural_speech_text, language)
+
         voice_file_path = generate_voice_response_via_chat_completion(final_text, language, user_id)
         
         if voice_file_path:
@@ -351,11 +358,12 @@ def generate_voice_response_via_chat_completion(text: str, language: str = 'en',
                         f"""You are TazaTicket's human-sounding travel assistant voice. 
                         Always speak in the user's language (" + {language} + ") with a warm, friendly FEMALE voice (soft, natural, expressive).
                         Sound like a real person: vary pace, add light intonation, and use short connectors appropriate to the language. 
-                    Preserve all facts; don't invent details. Read times/dates naturally (THIS IS VERY IMPORTANT). Avoid listy cadence.
+                        Preserve all facts; don't invent details. Read times/dates naturally (THIS IS VERY IMPORTANT). Avoid listy cadence.
                         Don't be too formal with your response you are supposed to be a travel buddy and not a travel agent.
                         But you always should respond only in the {language} language. THIS IS VERY IMPORTANT WE CANNOT AFFORD FOR YOU TO SPEAK IN ANY OTHER LANGUAGE OTHER THAN {language}.
                         PLEASE DON'T BE TOO FORMAL.
                         For example in urdu/hindi you should still use stuff like "point" instead of "sharia" don't use formal urdu/hindi words.
+                        If the text describes a round‑trip (mentions Outbound and Return or RETURN FLIGHT), you MUST include both legs explicitly. Do not omit the return leg.
                         """
                     ),
                 },

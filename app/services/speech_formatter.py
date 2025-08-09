@@ -728,9 +728,12 @@ class FlightSpeechFormatter:
             if d.get('ret_flight_number'):
                 parts.append(L['flight_no'].format(flight=d['ret_flight_number']))
 
-            # Total trip duration if provided
+            # Total trip duration if provided – always include if present
             if d.get('total_trip_duration'):
                 parts.append(L['total_time'].format(duration=self._clean_duration(d['total_trip_duration'])))
+            # If not present, but both leg durations are present, include a concise combined reminder
+            elif d.get('out_duration') and d.get('ret_duration'):
+                parts.append("Both ways combined look good timing-wise.")
         else:
             # One-way formatting (existing)
             dep_phrase = self._build_dep_arr_phrase_generic(
