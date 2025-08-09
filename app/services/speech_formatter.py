@@ -505,6 +505,93 @@ class FlightSpeechFormatter:
 
         details: Dict[str, str] = {}
 
+        # --- Detect round-trip sections if present ---
+        lower = response.lower()
+        out_idx = lower.find('outbound flight')
+        ret_idx = lower.find('return flight')
+        def section_text(start: int, end: Optional[int]) -> str:
+            if start == -1:
+                return ''
+            if end is None or end == -1:
+                return response[start:]
+            return response[start:end]
+
+        out_section = section_text(out_idx, ret_idx if ret_idx != -1 else None)
+        ret_section = section_text(ret_idx, None)
+
+        # Helper to parse a section (outbound/return)
+        def parse_leg(section: str) -> Dict[str, str]:
+            leg: Dict[str, str] = {}
+            if not section:
+                return leg
+            def sgrab(patterns: List[str]) -> Optional[str]:
+                for p in patterns:
+                    m = re.search(p, section, flags=re.IGNORECASE)
+                    if m:
+                        return m.group(1).strip()
+                return None
+            dep_raw = sgrab([r'📅\s*Departure:\s*(.+?)(?:\n|$)', r'Departure:\s*(.+?)(?:\n|$)'])
+            arr_raw = sgrab([r'🛬\s*Arrival:\s*(.+?)(?:\n|$)', r'Arrival:\s*(.+?)(?:\n|$)'])
+            airline = sgrab([r'🏢\s*Airline:\s*(.+?)(?:\n|$)', r'Airline:\s*(.+?)(?:\n|$)'])
+            flight_no = sgrab([r'✈️\s*Flight:\s*(.+?)(?:\n|$)', r'Flight:\s*(.+?)(?:\n|$)'])
+            stops = sgrab([r'🔄\s*Stops:\s*(.+?)(?:\n|$)', r'Stops?:\s*(.+?)(?:\n|$)'])
+            dur = sgrab([r'⏱️\s*Duration:\s*(.+?)(?:\n|$)', r'Duration:\s*(.+?)(?:\n|$)'])
+
+            def parse_dt_airport(raw: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+                pats = [
+                    r'(\w+\s+\d{1,2}(?:,\s*\d{4})?)\s*(?:at\s*)?(\d{1,2}:\d{2})\s*\((\w{3})\)',
+                    r'(\d{1,2}\s+\w+\s*\d{4}?)\s*(\d{1,2}:\d{2})\s*\((\w{3})\)',
+                    r'(\d{4}-\d{2}-\d{2})\s*(\d{1,2}:\d{2})\s*\((\w{3})\)'
+                ]
+                for p in pats:
+                    m = re.search(p, raw)
+                    if m:
+                        return m.group(1), m.group(2), m.group(3)
+                return None, None, None
+
+            if dep_raw:
+                d_date, d_time, d_code = parse_dt_airport(dep_raw)
+                if d_date: leg['departure_date'] = d_date
+                if d_time: leg['departure_time'] = d_time
+                if d_code: leg['from_city'] = d_code
+                leg['departure_info'] = dep_raw
+            if arr_raw:
+                a_date, a_time, a_code = parse_dt_airport(arr_raw)
+                if a_date: leg['arrival_date'] = a_date
+                if a_time: leg['arrival_time'] = a_time
+                if a_code: leg['to_city'] = a_code
+                leg['arrival_info'] = arr_raw
+            if airline: leg['airline'] = airline
+            if flight_no: leg['flight_number'] = flight_no
+            if stops: leg['stops'] = stops
+            if dur: leg['duration'] = dur
+            return leg
+
+        outbound_leg = parse_leg(out_section)
+        return_leg = parse_leg(ret_section)
+
+        if outbound_leg and return_leg:
+            details['roundtrip'] = True
+            # Prefix fields to avoid collision
+            for k, v in outbound_leg.items():
+                details[f'out_{k}'] = v
+            for k, v in return_leg.items():
+                details[f'ret_{k}'] = v
+            # Also capture price and baggage from whole response
+            m = re.search(r'(?:💰\s*)?Total Price:\s*(\w+)\s*([\d,\.]+)', response, flags=re.IGNORECASE)
+            if not m:
+                m = re.search(r'(?:💰\s*)?Price:\s*(\w+)\s*([\d,\.]+)', response, flags=re.IGNORECASE)
+            if m:
+                details['currency'] = m.group(1)
+                details['price'] = m.group(2).replace(',', '')
+            bag = grab([r'🧳\s*Baggage:\s*(.+?)(?:\n|$)', r'Baggage:\s*(.+?)(?:\n|$)'])
+            if bag:
+                details['baggage'] = bag
+            total_trip = grab([r'⏰\s*Total Trip Duration:\s*(.+?)(?:\n|$)'])
+            if total_trip:
+                details['total_trip_duration'] = total_trip
+            return details
+
         # Price
         m = re.search(r'(?:💰\s*)?Price:\s*(\w+)\s*([\d,\.]+)', response, flags=re.IGNORECASE)
         if not m:
@@ -579,39 +666,93 @@ class FlightSpeechFormatter:
             parts.append(L['price'].format(price=d['price'],
                                            currency=self._get_currency_name(d.get('currency', ''))))
 
-        if d.get('airline'):
+        # One-way airline line
+        if d.get('airline') and not d.get('roundtrip'):
             parts.append(L['airline'].format(airline=self._get_airline_name(d['airline'])))
 
-        if d.get('flight_number'):
+        if d.get('flight_number') and not d.get('roundtrip'):
             parts.append(L['flight_no'].format(flight=d['flight_number']))
 
-        # Departure
-        dep_phrase = self._build_dep_arr_phrase_generic(
-            L['leaves'], d.get('departure_date'), d.get('departure_time'),
-            d.get('from_city'), d.get('departure_info'), L, dep=True
-        )
-        if dep_phrase:
-            parts.append(dep_phrase)
+        if d.get('roundtrip'):
+            # Outbound block
+            parts.append("Outbound:")
+            out_dep = self._build_dep_arr_phrase_generic(
+                L['leaves'], d.get('out_departure_date'), d.get('out_departure_time'),
+                d.get('out_from_city'), d.get('out_departure_info', ''), L, dep=True
+            )
+            if out_dep:
+                parts.append(out_dep)
+            out_arr = self._build_dep_arr_phrase_generic(
+                L['lands'], d.get('out_arrival_date'), d.get('out_arrival_time'),
+                d.get('out_to_city'), d.get('out_arrival_info', ''), L, dep=False
+            )
+            if out_arr:
+                parts.append(out_arr)
+            if d.get('out_duration'):
+                parts.append(L['total_time'].format(duration=self._clean_duration(d['out_duration'])))
+            if d.get('out_stops'):
+                st_low = d['out_stops'].lower()
+                if "direct" in st_low or "nonstop" in st_low or "0" in st_low:
+                    parts.append(L['direct'])
+                else:
+                    parts.append(L['has_stops'].format(stops=d['out_stops']))
+            if d.get('out_airline'):
+                parts.append(L['airline'].format(airline=self._get_airline_name(d['out_airline'])))
+            if d.get('out_flight_number'):
+                parts.append(L['flight_no'].format(flight=d['out_flight_number']))
 
-        # Arrival
-        arr_phrase = self._build_dep_arr_phrase_generic(
-            L['lands'], d.get('arrival_date'), d.get('arrival_time'),
-            d.get('to_city'), d.get('arrival_info'), L, dep=False
-        )
-        if arr_phrase:
-            parts.append(arr_phrase)
+            # Return block
+            parts.append("Return:")
+            ret_dep = self._build_dep_arr_phrase_generic(
+                L['leaves'], d.get('ret_departure_date'), d.get('ret_departure_time'),
+                d.get('ret_from_city'), d.get('ret_departure_info', ''), L, dep=True
+            )
+            if ret_dep:
+                parts.append(ret_dep)
+            ret_arr = self._build_dep_arr_phrase_generic(
+                L['lands'], d.get('ret_arrival_date'), d.get('ret_arrival_time'),
+                d.get('ret_to_city'), d.get('ret_arrival_info', ''), L, dep=False
+            )
+            if ret_arr:
+                parts.append(ret_arr)
+            if d.get('ret_duration'):
+                parts.append(L['total_time'].format(duration=self._clean_duration(d['ret_duration'])))
+            if d.get('ret_stops'):
+                st_low = d['ret_stops'].lower()
+                if "direct" in st_low or "nonstop" in st_low or "0" in st_low:
+                    parts.append(L['direct'])
+                else:
+                    parts.append(L['has_stops'].format(stops=d['ret_stops']))
+            if d.get('ret_airline'):
+                parts.append(L['airline'].format(airline=self._get_airline_name(d['ret_airline'])))
+            if d.get('ret_flight_number'):
+                parts.append(L['flight_no'].format(flight=d['ret_flight_number']))
 
-        # Duration
-        if d.get('duration'):
-            parts.append(L['total_time'].format(duration=self._clean_duration(d['duration'])))
-
-        # Stops
-        if d.get('stops'):
-            st_low = d['stops'].lower()
-            if "direct" in st_low or "nonstop" in st_low or "0" in st_low:
-                parts.append(L['direct'])
-            else:
-                parts.append(L['has_stops'].format(stops=d['stops']))
+            # Total trip duration if provided
+            if d.get('total_trip_duration'):
+                parts.append(L['total_time'].format(duration=self._clean_duration(d['total_trip_duration'])))
+        else:
+            # One-way formatting (existing)
+            dep_phrase = self._build_dep_arr_phrase_generic(
+                L['leaves'], d.get('departure_date'), d.get('departure_time'),
+                d.get('from_city'), d.get('departure_info'), L, dep=True
+            )
+            if dep_phrase:
+                parts.append(dep_phrase)
+            arr_phrase = self._build_dep_arr_phrase_generic(
+                L['lands'], d.get('arrival_date'), d.get('arrival_time'),
+                d.get('to_city'), d.get('arrival_info'), L, dep=False
+            )
+            if arr_phrase:
+                parts.append(arr_phrase)
+            if d.get('duration'):
+                parts.append(L['total_time'].format(duration=self._clean_duration(d['duration'])))
+            if d.get('stops'):
+                st_low = d['stops'].lower()
+                if "direct" in st_low or "nonstop" in st_low or "0" in st_low:
+                    parts.append(L['direct'])
+                else:
+                    parts.append(L['has_stops'].format(stops=d['stops']))
 
         # Baggage
         if d.get('baggage'):
