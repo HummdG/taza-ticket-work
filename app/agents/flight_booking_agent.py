@@ -553,6 +553,34 @@ def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
             print("✅ Using paired outbound/return offerings for true round-trip")
             return process_true_roundtrip(state, outbound, return_off)
 
+        # Fallback attempt: some APIs provide a single offering that includes both outbound and return
+        if trip_type == "round-trip" or has_return_date:
+            print("🔎 Trying to detect a combined round-trip within a single offering")
+            best_rt_details = None
+            best_rt_offering = None
+            best_rt_price = float("inf")
+            for off in offerings:
+                try:
+                    details = extract_roundtrip_flight_details(off, state)
+                    # Consider it valid round-trip only if both legs are present
+                    if (
+                        details.get("outbound_departure_time") != "N/A"
+                        and details.get("return_departure_time") != "N/A"
+                    ):
+                        price_str = details.get("price") or "0"
+                        price_val = float(price_str) if str(price_str).replace(".", "", 1).isdigit() else float("inf")
+                        if price_val < best_rt_price:
+                            best_rt_price = price_val
+                            best_rt_details = details
+                            best_rt_offering = off
+                except Exception:
+                    continue
+            if best_rt_details and best_rt_offering:
+                print("✅ Using combined round-trip extracted from a single offering")
+                state["cheapest_flight"] = best_rt_offering
+                state["response_text"] = format_flight_response(best_rt_details)
+                return state
+
         # Else: fall back to one-way → choose overall cheapest offering and process
         print("➡️ Falling back to one-way analysis (no valid paired round-trip found)")
         cheapest_offering = min(offerings, key=lambda o: offering_min_price(o) or float("inf"))
