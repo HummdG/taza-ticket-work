@@ -722,6 +722,9 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
             t = (text or "").lower().strip()
             return t in {"new", "reset", "start over", "restart", "clear", "cancel"}
         
+        pre_routed_response: Optional[str] = None
+        pre_routed_message_type: Optional[str] = None
+        
         if _has_reset_intent(user_message):
             # Clear both collection state and last flight context to avoid bleed
             memory_manager.clear_flight_collection_state(user_id)
@@ -729,99 +732,96 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
                 memory_manager.clear_flight_context(user_id)
             except Exception:
                 pass
-            prompt = "Alright, a fresh start! ✨ Where would you like to fly from? 🛫"
-            memory_manager.add_conversation(user_id, user_message, prompt, "reset")
-            return prompt, None
+            pre_routed_response = "Alright, a fresh start! ✨ Where would you like to fly from? 🛫"
+            pre_routed_message_type = "reset"
         
-        if _has_booking_intent(user_message):
+        elif _has_booking_intent(user_message):
             # Try to fetch last known quote reference from flight context
             flight_ctx = memory_manager.get_flight_context(user_id)
             quote_ref = None
             if isinstance(flight_ctx, dict):
                 quote_ref = flight_ctx.get("last_quote_reference")
             
-            # If not in context, try to infer from last raw_api_response in memory by reusing the parser (not stored). As fallback, ask user to restate.
             if quote_ref:
-                booking_msg = "Please quote the following booking reference to the number below:"
-                memory_manager.add_conversation(user_id, user_message, booking_msg, "booking")
-                return booking_msg, None
+                pre_routed_response = "Please quote the following booking reference to the number below:"
+                pre_routed_message_type = "booking"
             else:
-                # Soft fallback message
-                booking_msg = "Great — I can help with that. Can you please resend your last flight details here, or say 'search again' so I can generate your booking reference?"
-                memory_manager.add_conversation(user_id, user_message, booking_msg, "booking_help")
-                return booking_msg, None
+                pre_routed_response = "Great — I can help with that. Can you please resend your last flight details here, or say 'search again' so I can generate your booking reference?"
+                pre_routed_message_type = "booking_help"
         
-        # Get conversation context from memory (use deeper history for better continuity)
-        conversation_context = memory_manager.get_conversation_context(user_id, max_recent=12)
-        
-        # Check if user is currently collecting flight information
-        is_collecting = memory_manager.is_collecting_flight_info(user_id)
-        
-        if is_collecting:
-            print(f"🔄 Continuing flight info collection for user: {user_id}")
-            
-            # Auto-detect if the user wants a different/new flight (override current collection)
-            def _wants_new_flight(text: str, current_info: dict) -> bool:
-                t = (text or "").lower()
-                keywords = [
-                    "instead", "different city", "another city", "new ticket", "different ticket",
-                    "change destination", "change city", "change from", "change to", "new flight",
-                    "go to ", "i want to go to", "fly to ", "fly from ", "switch to"
-                ]
-                if any(k in t for k in keywords):
-                    return True
-                try:
-                    # Extract without prior context to avoid bias
-                    from ..services.flight_info_collector import flight_collector as _fc
-                    extracted = _fc.extract_flight_info(text, "")
-                    fc = extracted.get("from_city")
-                    tc = extracted.get("to_city")
-                    if (fc and fc != current_info.get("from_city")) or (tc and tc != current_info.get("to_city")):
-                        return True
-                except Exception:
-                    pass
-                return False
-            
-            try:
-                collection_state = memory_manager.get_flight_collection_state(user_id)
-                current_info = collection_state.get("collected_info", {}) if isinstance(collection_state, dict) else {}
-                if _wants_new_flight(user_message, current_info):
-                    print("🔁 Detected new/different flight intent mid-flow → resetting collection")
-                    memory_manager.clear_flight_collection_state(user_id)
-                    # Start a fresh collection with no previous context to avoid bleed-through
-                    response = start_flight_info_collection(user_message, user_id, "")
-                    message_type = "flight_collection"
-                    # Save the conversation and return
-                    message_identifier = f"🎤 [Voice]: {user_message}" if is_voice_message else user_message
-                    memory_manager.add_conversation(user_id, message_identifier, response, message_type)
-                    return response, None
-            except Exception:
-                pass
-            
-            response = handle_flight_info_collection(user_message, user_id, conversation_context)
-            message_type = "flight_collection"
-        
+        # If we prepared a direct response (reset/booking), skip routing and go to voice generation
+        if pre_routed_response is not None:
+            response = pre_routed_response
+            message_type = pre_routed_message_type or "general"
         else:
-            # Analyze intent and completeness first to avoid breaking on missing info
-            has_intent, is_complete, _extracted = analyze_flight_request_completeness(user_message, conversation_context)
+            # Get conversation context from memory (use deeper history for better continuity)
+            conversation_context = memory_manager.get_conversation_context(user_id, max_recent=12)
             
-            # Start or continue info collection if intent is present but info is incomplete
-            if has_intent and not is_complete:
-                print(f"📝 Starting flight info collection for user: {user_id}")
-                response = start_flight_info_collection(user_message, user_id, conversation_context)
-                message_type = "flight_collection"
+            # Check if user is currently collecting flight information
+            is_collecting = memory_manager.is_collecting_flight_info(user_id)
             
-            # Handle complete flight booking requests
-            elif has_intent and is_complete:
-                print(f"🛫 Routing to flight booking agent for user: {user_id}")
-                response = process_flight_request(user_message, user_id, conversation_context)
-                message_type = "flight"
+            if is_collecting:
+                print(f"🔄 Continuing flight info collection for user: {user_id}")
+                
+                # Auto-detect if the user wants a different/new flight (override current collection)
+                def _wants_new_flight(text: str, current_info: dict) -> bool:
+                    t = (text or "").lower()
+                    keywords = [
+                        "instead", "different city", "another city", "new ticket", "different ticket",
+                        "change destination", "change city", "change from", "change to", "new flight",
+                        "go to ", "i want to go to", "fly to ", "fly from ", "switch to"
+                    ]
+                    if any(k in t for k in keywords):
+                        return True
+                    try:
+                        # Extract without prior context to avoid bias
+                        from ..services.flight_info_collector import flight_collector as _fc
+                        extracted = _fc.extract_flight_info(text, "")
+                        fc = extracted.get("from_city")
+                        tc = extracted.get("to_city")
+                        if (fc and fc != current_info.get("from_city")) or (tc and tc != current_info.get("to_city")):
+                            return True
+                    except Exception:
+                        pass
+                    return False
+                
+                try:
+                    collection_state = memory_manager.get_flight_collection_state(user_id)
+                    current_info = collection_state.get("collected_info", {}) if isinstance(collection_state, dict) else {}
+                    if _wants_new_flight(user_message, current_info):
+                        print("🔁 Detected new/different flight intent mid-flow → resetting collection")
+                        memory_manager.clear_flight_collection_state(user_id)
+                        # Start a fresh collection with no previous context to avoid bleed-through
+                        response = start_flight_info_collection(user_message, user_id, "")
+                        message_type = "flight_collection"
+                    else:
+                        response = handle_flight_info_collection(user_message, user_id, conversation_context)
+                        message_type = "flight_collection"
+                except Exception:
+                    response = handle_flight_info_collection(user_message, user_id, conversation_context)
+                    message_type = "flight_collection"
             
-            # Default to general conversation
             else:
-                print(f"💬 Routing to general conversation agent for user: {user_id}")
-                response = handle_general_conversation(user_message, user_id, conversation_context)
-                message_type = "general"
+                # Analyze intent and completeness first to avoid breaking on missing info
+                has_intent, is_complete, _extracted = analyze_flight_request_completeness(user_message, conversation_context)
+                
+                # Start or continue info collection if intent is present but info is incomplete
+                if has_intent and not is_complete:
+                    print(f"📝 Starting flight info collection for user: {user_id}")
+                    response = start_flight_info_collection(user_message, user_id, conversation_context)
+                    message_type = "flight_collection"
+                
+                # Handle complete flight booking requests
+                elif has_intent and is_complete:
+                    print(f"🛫 Routing to flight booking agent for user: {user_id}")
+                    response = process_flight_request(user_message, user_id, conversation_context)
+                    message_type = "flight"
+                
+                # Default to general conversation
+                else:
+                    print(f"💬 Routing to general conversation agent for user: {user_id}")
+                    response = handle_general_conversation(user_message, user_id, conversation_context)
+                    message_type = "general"
         
         # Generate voice response if original was a voice message
         voice_file_url = None
