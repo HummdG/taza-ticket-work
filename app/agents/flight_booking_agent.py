@@ -9,6 +9,7 @@ from typing import Dict, Optional, List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 from dotenv import load_dotenv
+from hashlib import sha1
 
 # LangGraph and LangChain imports
 from langgraph.graph import StateGraph, END
@@ -442,6 +443,22 @@ def analyze_bulk_search_results(state: FlightBookingState) -> FlightBookingState
  📊 Searched {len(bulk_results)} dates to find you the best price!
  
  ❓ Would you like me to search for more options or help you with booking?"""
+            
+            # Generate and append booking quote reference
+            try:
+                quote_code = generate_quote_reference_for_offering(state, global_cheapest_flight)
+                state["quote_reference"] = quote_code
+                response = append_booking_instructions(response, quote_code)
+                # Persist to memory for later booking
+                try:
+                    from ..services.memory_service import memory_manager
+                    memory_manager.add_flight_context(state.get("user_id", "unknown"), {
+                        "last_quote_reference": quote_code
+                    })
+                except Exception as _:
+                    pass
+            except Exception as _:
+                pass
              
             state["response_text"] = response
              
@@ -578,7 +595,15 @@ def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
             if best_rt_details and best_rt_offering:
                 print("✅ Using combined round-trip extracted from a single offering")
                 state["cheapest_flight"] = best_rt_offering
-                state["response_text"] = format_flight_response(best_rt_details)
+                response = format_flight_response(best_rt_details)
+                # Append booking
+                try:
+                    quote_code = generate_quote_reference_for_offering(state, best_rt_offering)
+                    state["quote_reference"] = quote_code
+                    response = append_booking_instructions(response, quote_code)
+                except Exception as _:
+                    pass
+                state["response_text"] = response
                 return state
 
         # Else: fall back to one-way → choose overall cheapest offering and process
@@ -643,7 +668,25 @@ def process_true_roundtrip(state: FlightBookingState, outbound_offering: Dict, r
         }
         
         state["cheapest_flight"] = {"outbound": outbound_offering, "return": return_offering}
-        state["response_text"] = format_flight_response(roundtrip_details)
+        response = format_flight_response(roundtrip_details)
+        
+        # Generate and append booking quote reference
+        try:
+            quote_code = generate_quote_reference_for_roundtrip(state, outbound_offering, return_offering)
+            state["quote_reference"] = quote_code
+            response = append_booking_instructions(response, quote_code)
+            # Persist to memory for later booking
+            try:
+                from ..services.memory_service import memory_manager
+                memory_manager.add_flight_context(state.get("user_id", "unknown"), {
+                    "last_quote_reference": quote_code
+                })
+            except Exception as _:
+                pass
+        except Exception as _:
+            pass
+        
+        state["response_text"] = response
         
         print(f"✅ True round-trip processed: EUR {total_price:.2f} total")
         
@@ -900,7 +943,25 @@ def process_oneway_journey(state: FlightBookingState, offerings: List[Dict]) -> 
             
             # Extract journey details using the existing function
             journey_details = extract_flight_details(cheapest_offering, state)
-            state["response_text"] = format_flight_response(journey_details)
+            response = format_flight_response(journey_details)
+            
+            # Generate and append booking quote reference
+            try:
+                quote_code = generate_quote_reference_for_offering(state, cheapest_offering)
+                state["quote_reference"] = quote_code
+                response = append_booking_instructions(response, quote_code)
+                # Persist to memory for later booking
+                try:
+                    from ..services.memory_service import memory_manager
+                    memory_manager.add_flight_context(state.get("user_id", "unknown"), {
+                        "last_quote_reference": quote_code
+                    })
+                except Exception as _:
+                    pass
+            except Exception as _:
+                pass
+            
+            state["response_text"] = response
             
             print(f"✅ Found cheapest one-way journey: {journey_details['currency']} {journey_details['price']}")
             print(f"   Complete route: {journey_details['departure_time']} → {journey_details['arrival_time']}")
@@ -1965,3 +2026,70 @@ def create_flight_booking_agent():
 
 # Create the enhanced compiled agent with original name
 flight_booking_agent = create_flight_booking_agent()
+
+# --- Quote reference helpers ---
+def _select_cheapest_brand_offering(offering: Dict) -> Tuple[Optional[Dict], Optional[str], Optional[str]]:
+    """Return the cheapest ProductBrandOffering dict plus brandRef and productRef if available."""
+    cheapest = None
+    cheapest_price = float("inf")
+    cheapest_brand_ref = None
+    cheapest_product_ref = None
+    for option in offering.get("ProductBrandOptions", []):
+        brand_offerings = option.get("ProductBrandOffering", [])
+        for brand_off in brand_offerings:
+            price_info = brand_off.get("BestCombinablePrice", {})
+            if isinstance(price_info, dict) and price_info.get("TotalPrice") is not None:
+                price = float(price_info["TotalPrice"])
+                if price < cheapest_price:
+                    cheapest = brand_off
+                    cheapest_price = price
+                    brand = brand_off.get("Brand", {})
+                    if isinstance(brand, dict):
+                        cheapest_brand_ref = brand.get("BrandRef")
+                    # First productRef if present
+                    prod_list = brand_off.get("Product", [])
+                    if prod_list and isinstance(prod_list[0], dict):
+                        cheapest_product_ref = prod_list[0].get("productRef")
+    return cheapest, cheapest_brand_ref, cheapest_product_ref
+
+
+def generate_quote_reference_for_offering(state: FlightBookingState, offering: Dict) -> str:
+    """Generate a short, human-quotable reference using transactionId + offering metadata.
+    Format: TT-<5charhash>
+    """
+    try:
+        api = state.get("raw_api_response", {})
+        tx = (
+            api.get("CatalogProductOfferingsResponse", {})
+            .get("transactionId", "")
+        )
+        offering_id = offering.get("id", "")
+        _cheapest, brand_ref, product_ref = _select_cheapest_brand_offering(offering)
+        basis = f"{tx}|{offering_id}|{brand_ref or ''}|{product_ref or ''}"
+        short = sha1(basis.encode("utf-8")).hexdigest()[:8].upper()
+        return f"TT-{short}"
+    except Exception:
+        # Fallback to a timestamp-based stub
+        return f"TT-{int(time.time())}"
+
+
+def generate_quote_reference_for_roundtrip(state: FlightBookingState, outbound_off: Dict, return_off: Dict) -> str:
+    try:
+        api = state.get("raw_api_response", {})
+        tx = (
+            api.get("CatalogProductOfferingsResponse", {})
+            .get("transactionId", "")
+        )
+        out_id = outbound_off.get("id", "")
+        ret_id = return_off.get("id", "")
+        basis = f"{tx}|{out_id}+{ret_id}"
+        short = sha1(basis.encode("utf-8")).hexdigest()[:8].upper()
+        return f"TT-{short}"
+    except Exception:
+        return f"TT-{int(time.time())}"
+
+
+def append_booking_instructions(text: str, quote_code: str) -> str:
+    """Append a standardized booking instruction line."""
+    line = f"\n\nTo book: please quote REF {quote_code} to +306945169169 to proceed."
+    return f"{text}{line}"

@@ -709,6 +709,31 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
         from .conversation_router import should_handle_as_flight_booking, should_collect_flight_info, analyze_flight_request_completeness
         from ..agents.general_conversation_agent import handle_general_conversation
         
+        # Booking intent quick-path: if user says they want to book, return quote ref if available
+        def _has_booking_intent(text: str) -> bool:
+            t = (text or "").lower()
+            return any(phrase in t for phrase in [
+                "i want to book", "book this", "book it", "go ahead and book", "please book", "confirm booking", "reserve it"
+            ])
+        
+        if _has_booking_intent(user_message):
+            # Try to fetch last known quote reference from flight context
+            flight_ctx = memory_manager.get_flight_context(user_id)
+            quote_ref = None
+            if isinstance(flight_ctx, dict):
+                quote_ref = flight_ctx.get("last_quote_reference")
+            
+            # If not in context, try to infer from last raw_api_response in memory by reusing the parser (not stored). As fallback, ask user to restate.
+            if quote_ref:
+                booking_msg = f"Thank you! Please quote REF {quote_ref} to +306945169169 to proceed."
+                memory_manager.add_conversation(user_id, user_message, booking_msg, "booking")
+                return booking_msg, None
+            else:
+                # Soft fallback message
+                booking_msg = "Great — I can help with that. Can you please resend your last flight details here, or say 'search again' so I can generate your booking reference?"
+                memory_manager.add_conversation(user_id, user_message, booking_msg, "booking_help")
+                return booking_msg, None
+        
         # Get conversation context from memory (use deeper history for better continuity)
         conversation_context = memory_manager.get_conversation_context(user_id, max_recent=12)
         
@@ -766,7 +791,7 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
         memory_manager.add_conversation(user_id, message_identifier, response, message_type)
         
         return response, voice_file_url
-            
+        
     except Exception as e:
         print(f"❌ Error processing message: {e}")
         error_response = "😅 I'm having trouble processing your request right now. Please try again later!"
@@ -777,7 +802,7 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
             memory_manager.add_conversation(user_id, user_message, error_response, "error")
         except:
             pass
-            
+        
         return error_response, None
 
 
