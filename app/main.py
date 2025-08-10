@@ -219,6 +219,10 @@ async def handle_text_message_async(message_text: str, user_id: str):
 
     # 1) generate the reply
     text_response, _ = process_user_message(message_text, user_id)
+    if not isinstance(text_response, str):
+        text_response = str(text_response or "")
+    if not text_response.strip():
+        text_response = "✈️ To get started, please tell me your departure city, destination, and date."
 
     # 2) send via Twilio API
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
@@ -416,12 +420,15 @@ async def send_text_response_direct_api(to_number: str, text: str):
         print(f"📝 Sending text response via direct Twilio API...")
         print(f"   📞 From: {twilio_whatsapp_number}")
         print(f"   📱 To: {to_number}")
-        print(f"   💬 Message: '{text[:100]}{'...' if len(text) > 100 else ''}'")
+        safe_text = text if isinstance(text, str) else str(text or "")
+        if not safe_text.strip():
+            safe_text = "✈️ To get started, please tell me your departure city, destination, and date."
+        print(f"   💬 Message: '{safe_text[:100]}{'...' if len(safe_text) > 100 else ''}'")
         
         message = client.messages.create(
             from_=twilio_whatsapp_number,
             to=to_number,
-            body=text
+            body=safe_text
         )
         
         print(f"✅ Text message sent successfully!")
