@@ -26,6 +26,50 @@ class FlightInfoCollector:
         today = datetime.now().strftime("%Y-%m-%d")
         tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
         
+        # --- Fast-path heuristics before LLM ---
+        try:
+            msg = (user_message or "").strip()
+            msg_lower = msg.lower()
+            # Numeric-only → passengers update
+            if re.fullmatch(r"\d+", msg):
+                pax = int(msg)
+                pax = max(1, pax)
+                return {
+                    "from_city": None,
+                    "to_city": None,
+                    "departure_date": None,
+                    "return_date": None,
+                    "passengers": pax,
+                    "passenger_age": None,
+                    "trip_type": None,
+                    "flight_intent": True
+                }
+            # Trip type mentions
+            if any(kw in msg_lower for kw in ["round trip", "round-trip", "return trip", "returning", "two way", "2-way"]):
+                return {
+                    "from_city": None,
+                    "to_city": None,
+                    "departure_date": None,
+                    "return_date": None,
+                    "passengers": None,
+                    "passenger_age": None,
+                    "trip_type": "round-trip",
+                    "flight_intent": True
+                }
+            if any(kw in msg_lower for kw in ["one way", "one-way", "oneway"]):
+                return {
+                    "from_city": None,
+                    "to_city": None,
+                    "departure_date": None,
+                    "return_date": None,
+                    "passengers": None,
+                    "passenger_age": None,
+                    "trip_type": "one-way",
+                    "flight_intent": True
+                }
+        except Exception:
+            pass
+        
         context_section = ""
         if conversation_context:
             context_section = f"\nPrevious conversation:\n{conversation_context}\n"
