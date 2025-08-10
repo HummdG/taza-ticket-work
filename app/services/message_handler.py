@@ -829,6 +829,16 @@ def start_flight_info_collection(user_message: str, user_id: str, conversation_c
             return handle_general_conversation(user_message, user_id, conversation_context)
         
         if is_complete:
+            # Before searching, collect trip type / passengers if missing
+            additional_missing = flight_collector.identify_additional_missing_info(extracted_info)
+            if additional_missing:
+                collection_state = {
+                    "collecting": True,
+                    "collected_info": extracted_info,
+                    "started_with": user_message
+                }
+                memory_manager.set_flight_collection_state(user_id, collection_state)
+                return flight_collector.generate_question_for_additional_info(additional_missing, extracted_info)
             # Complete information, route to flight search
             return process_flight_request(user_message, user_id, conversation_context)
         
@@ -840,7 +850,7 @@ def start_flight_info_collection(user_message: str, user_id: str, conversation_c
         }
         memory_manager.set_flight_collection_state(user_id, collection_state)
         
-        # Generate question for missing information
+        # Generate question for missing required information
         missing_fields = flight_collector.identify_missing_info(extracted_info)
         question = flight_collector.generate_question_for_missing_info(missing_fields, extracted_info)
         
@@ -875,36 +885,42 @@ def handle_flight_info_collection(user_message: str, user_id: str, conversation_
         # Merge with existing information
         merged_info = flight_collector.merge_flight_info(current_info, new_info)
         
-        # Check if we now have complete information
-        if flight_collector.is_flight_info_complete(merged_info):
-            # Complete! Clear collection state and search for flights
-            memory_manager.clear_flight_collection_state(user_id)
-            
-            # Create a summary and proceed to flight search
-            summary = flight_collector.format_collected_info_summary(merged_info)
-            
-            # Construct a complete flight request message
-            from_city = merged_info.get("from_city", "")
-            to_city = merged_info.get("to_city", "")
-            departure_date = merged_info.get("departure_date", "")
-            
-            complete_request = f"Find flights from {from_city} to {to_city} on {departure_date}"
-            
-            # Process as complete flight request
-            flight_response = process_flight_request(complete_request, user_id, conversation_context)
-            
-            return f"{summary}\n\n{flight_response}"
-        
-        else:
-            # Still missing information, update state and ask for more
+        # First ensure required fields
+        missing_required = flight_collector.identify_missing_info(merged_info)
+        if missing_required:
             collection_state["collected_info"] = merged_info
             memory_manager.set_flight_collection_state(user_id, collection_state)
-            
-            # Generate next question
-            missing_fields = flight_collector.identify_missing_info(merged_info)
-            question = flight_collector.generate_question_for_missing_info(missing_fields, merged_info)
-            
-            return question
+            return flight_collector.generate_question_for_missing_info(missing_required, merged_info)
+        
+        # Then ensure additional (trip type/return/passengers)
+        missing_additional = flight_collector.identify_additional_missing_info(merged_info)
+        if missing_additional:
+            collection_state["collected_info"] = merged_info
+            memory_manager.set_flight_collection_state(user_id, collection_state)
+            return flight_collector.generate_question_for_additional_info(missing_additional, merged_info)
+        
+        # All info complete; clear state and proceed to search
+        memory_manager.clear_flight_collection_state(user_id)
+        
+        # Create a summary and proceed to flight search
+        summary = flight_collector.format_collected_info_summary(merged_info)
+        
+        # Construct a complete flight request message
+        from_city = merged_info.get("from_city", "")
+        to_city = merged_info.get("to_city", "")
+        departure_date = merged_info.get("departure_date", "")
+        return_date = merged_info.get("return_date")
+        passengers = merged_info.get("passengers", 1)
+        
+        if return_date:
+            complete_request = f"Round trip from {from_city} to {to_city}, depart {departure_date}, return {return_date}, {passengers} pax"
+        else:
+            complete_request = f"Find flights from {from_city} to {to_city} on {departure_date} for {passengers} passenger(s)"
+        
+        # Process as complete flight request
+        flight_response = process_flight_request(complete_request, user_id, conversation_context)
+        
+        return f"{summary}\n\n{flight_response}"
         
     except Exception as e:
         print(f"❌ Error handling flight info collection: {e}")
