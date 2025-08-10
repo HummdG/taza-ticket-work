@@ -717,6 +717,22 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
                 "help me book", "book for me", "book now", "proceed with booking", "go ahead with booking", "book this ticket", "book my ticket"
             ])
         
+        # Reset flow quick-path
+        def _has_reset_intent(text: str) -> bool:
+            t = (text or "").lower().strip()
+            return t in {"new", "reset", "start over", "restart", "clear", "cancel"}
+        
+        if _has_reset_intent(user_message):
+            # Clear both collection state and last flight context to avoid bleed
+            memory_manager.clear_flight_collection_state(user_id)
+            try:
+                memory_manager.clear_flight_context(user_id)
+            except Exception:
+                pass
+            prompt = "Alright, a fresh start! ✨ Where would you like to fly from? 🛫"
+            memory_manager.add_conversation(user_id, user_message, prompt, "reset")
+            return prompt, None
+        
         if _has_booking_intent(user_message):
             # Try to fetch last known quote reference from flight context
             flight_ctx = memory_manager.get_flight_context(user_id)
@@ -726,7 +742,7 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
             
             # If not in context, try to infer from last raw_api_response in memory by reusing the parser (not stored). As fallback, ask user to restate.
             if quote_ref:
-                booking_msg = f"Thank you! Please quote REF {quote_ref} to +306945169169 to proceed."
+                booking_msg = "Please quote the following booking reference to the number below:"
                 memory_manager.add_conversation(user_id, user_message, booking_msg, "booking")
                 return booking_msg, None
             else:
@@ -743,6 +759,45 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
         
         if is_collecting:
             print(f"🔄 Continuing flight info collection for user: {user_id}")
+            
+            # Auto-detect if the user wants a different/new flight (override current collection)
+            def _wants_new_flight(text: str, current_info: dict) -> bool:
+                t = (text or "").lower()
+                keywords = [
+                    "instead", "different city", "another city", "new ticket", "different ticket",
+                    "change destination", "change city", "change from", "change to", "new flight",
+                    "go to ", "i want to go to", "fly to ", "fly from ", "switch to"
+                ]
+                if any(k in t for k in keywords):
+                    return True
+                try:
+                    # Extract without prior context to avoid bias
+                    from ..services.flight_info_collector import flight_collector as _fc
+                    extracted = _fc.extract_flight_info(text, "")
+                    fc = extracted.get("from_city")
+                    tc = extracted.get("to_city")
+                    if (fc and fc != current_info.get("from_city")) or (tc and tc != current_info.get("to_city")):
+                        return True
+                except Exception:
+                    pass
+                return False
+            
+            try:
+                collection_state = memory_manager.get_flight_collection_state(user_id)
+                current_info = collection_state.get("collected_info", {}) if isinstance(collection_state, dict) else {}
+                if _wants_new_flight(user_message, current_info):
+                    print("🔁 Detected new/different flight intent mid-flow → resetting collection")
+                    memory_manager.clear_flight_collection_state(user_id)
+                    # Start a fresh collection with no previous context to avoid bleed-through
+                    response = start_flight_info_collection(user_message, user_id, "")
+                    message_type = "flight_collection"
+                    # Save the conversation and return
+                    message_identifier = f"🎤 [Voice]: {user_message}" if is_voice_message else user_message
+                    memory_manager.add_conversation(user_id, message_identifier, response, message_type)
+                    return response, None
+            except Exception:
+                pass
+            
             response = handle_flight_info_collection(user_message, user_id, conversation_context)
             message_type = "flight_collection"
         
@@ -884,6 +939,21 @@ def handle_flight_info_collection(user_message: str, user_id: str, conversation_
         
         # Merge with existing information
         merged_info = flight_collector.merge_flight_info(current_info, new_info)
+        
+        # If user gave a duration like '20 days' and we have a departure_date, compute return_date
+        try:
+            from .flight_info_collector import parse_trip_duration_days
+            if not merged_info.get("return_date") and merged_info.get("departure_date"):
+                days = parse_trip_duration_days(user_message)
+                if days and days > 0:
+                    dep = merged_info.get("departure_date")
+                    dep_dt = datetime.strptime(dep, "%Y-%m-%d")
+                    ret_dt = dep_dt + timedelta(days=days)
+                    merged_info["return_date"] = ret_dt.strftime("%Y-%m-%d")
+                    merged_info["trip_type"] = merged_info.get("trip_type") or "round-trip"
+                    merged_info["trip_type_source"] = merged_info.get("trip_type_source") or "explicit"
+        except Exception:
+            pass
         
         # First ensure required fields
         missing_required = flight_collector.identify_missing_info(merged_info)

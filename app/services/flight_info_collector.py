@@ -13,6 +13,22 @@ from langchain_openai import ChatOpenAI
 llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
 
 
+def parse_trip_duration_days(text: str) -> Optional[int]:
+    """Parse simple duration expressions like '10 days', '2 weeks', 'for 5d'. Return total days or None."""
+    try:
+        s = (text or "").lower()
+        # Common patterns
+        m = re.search(r"(\d+)\s*(day|days|d)\b", s)
+        if m:
+            return max(1, int(m.group(1)))
+        m = re.search(r"(\d+)\s*(week|weeks|w)\b", s)
+        if m:
+            return max(1, int(m.group(1)) * 7)
+        return None
+    except Exception:
+        return None
+
+
 class FlightInfoCollector:
     """Manages collection of flight information from partial requests"""
     
@@ -189,7 +205,10 @@ class FlightInfoCollector:
             return "🔁 Is this a round-trip or one-way? If round-trip, please also share your return date."
         if "return_date" in missing_additional:
             to_city = current_info.get("to_city", "")
-            return f"↩️ Noted it's round-trip. What's your return date{(' from ' + to_city) if to_city else ''}?"
+            return (
+                f"↩️ Noted it's round-trip. What's your return date{(' from ' + to_city) if to_city else ''}? "
+                "You can also tell me a duration like '5 days' or '2 weeks'."
+            )
         if "passengers" in missing_additional:
             return "👥 How many passengers should I search for? (e.g., 1, 2)"
         return ""
@@ -198,8 +217,22 @@ class FlightInfoCollector:
         """Merge new flight information with existing information"""
         merged = existing_info.copy()
         
+        # If user explicitly mentions a city in new_info, prefer it and clear conflicting stale fields
+        if new_info.get("from_city") and new_info.get("from_city") != existing_info.get("from_city"):
+            merged["from_city"] = new_info["from_city"]
+        if new_info.get("to_city") and new_info.get("to_city") != existing_info.get("to_city"):
+            merged["to_city"] = new_info["to_city"]
+        
         for key, value in new_info.items():
             if value is not None and value != "":
+                # Preserve explicit trip_type over inferred
+                if key == "trip_type":
+                    src_new = new_info.get("trip_type_source")
+                    src_old = merged.get("trip_type_source")
+                    if src_new == "explicit" or not merged.get("trip_type"):
+                        merged[key] = value
+                        merged["trip_type_source"] = src_new or src_old
+                    continue
                 merged[key] = value
         
         return merged
