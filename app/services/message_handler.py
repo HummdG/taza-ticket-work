@@ -713,7 +713,8 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
         def _has_booking_intent(text: str) -> bool:
             t = (text or "").lower()
             return any(phrase in t for phrase in [
-                "i want to book", "book this", "book it", "go ahead and book", "please book", "confirm booking", "reserve it"
+                "i want to book", "book this", "book it", "go ahead and book", "please book", "confirm booking", "reserve it",
+                "help me book", "book for me", "book now", "proceed with booking", "go ahead with booking", "book this ticket", "book my ticket"
             ])
         
         if _has_booking_intent(user_message):

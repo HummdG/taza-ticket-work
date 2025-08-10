@@ -236,7 +236,8 @@ async def handle_text_message_async(message_text: str, user_id: str):
     def _has_booking_intent(text: str) -> bool:
         t = (text or "").lower()
         return any(p in t for p in [
-            "i want to book", "book this", "book it", "go ahead and book", "please book", "confirm booking", "reserve it"
+            "i want to book", "book this", "book it", "go ahead and book", "please book", "confirm booking", "reserve it",
+            "help me book", "book for me", "book now", "proceed with booking", "go ahead with booking", "book this ticket", "book my ticket"
         ])
 
     if _has_booking_intent(message_text):
@@ -300,7 +301,8 @@ async def process_voice_message_async(user_id: str, message_text: str, media_url
         def _has_booking_intent(text: str) -> bool:
             t = (text or "").lower()
             return any(p in t for p in [
-                "i want to book", "book this", "book it", "go ahead and book", "please book", "confirm booking", "reserve it"
+                "i want to book", "book this", "book it", "go ahead and book", "please book", "confirm booking", "reserve it",
+                "help me book", "book for me", "book now", "proceed with booking", "go ahead with booking", "book this ticket", "book my ticket"
             ])
         if _has_booking_intent(message_text):
             try:
