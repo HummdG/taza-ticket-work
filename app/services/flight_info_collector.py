@@ -18,7 +18,7 @@ class FlightInfoCollector:
     
     def __init__(self):
         self.required_fields = ["from_city", "to_city", "departure_date"]
-        self.optional_fields = ["return_date", "passengers", "passenger_age", "trip_type"]
+        self.optional_fields = ["return_date", "passengers", "passenger_age", "trip_type", "trip_type_source"]
     
     def extract_flight_info(self, user_message: str, conversation_context: str = "") -> Dict:
         """Extract available flight information from user message"""
@@ -42,10 +42,13 @@ class FlightInfoCollector:
                     "passengers": pax,
                     "passenger_age": None,
                     "trip_type": None,
+                    "trip_type_source": None,
                     "flight_intent": True
                 }
             # Trip type mentions
-            if any(kw in msg_lower for kw in ["round trip", "round-trip", "return trip", "returning", "two way", "2-way"]):
+            round_phrases = ["round trip", "round-trip", "return trip", "returning", "two way", "2-way"]
+            one_phrases = ["one way", "one-way", "oneway"]
+            if any(kw in msg_lower for kw in round_phrases):
                 return {
                     "from_city": None,
                     "to_city": None,
@@ -54,9 +57,10 @@ class FlightInfoCollector:
                     "passengers": None,
                     "passenger_age": None,
                     "trip_type": "round-trip",
+                    "trip_type_source": "explicit",
                     "flight_intent": True
                 }
-            if any(kw in msg_lower for kw in ["one way", "one-way", "oneway"]):
+            if any(kw in msg_lower for kw in one_phrases):
                 return {
                     "from_city": None,
                     "to_city": None,
@@ -65,6 +69,7 @@ class FlightInfoCollector:
                     "passengers": None,
                     "passenger_age": None,
                     "trip_type": "one-way",
+                    "trip_type_source": "explicit",
                     "flight_intent": True
                 }
         except Exception:
@@ -86,6 +91,7 @@ class FlightInfoCollector:
             "passengers": "number or null",
             "passenger_age": "age or null",
             "trip_type": "one-way or round-trip or null",
+            "trip_type_source": "explicit or inferred or null",
             "flight_intent": true/false
         }}
         
@@ -94,6 +100,8 @@ class FlightInfoCollector:
         - Greetings and general smalltalk → flight_intent: false
         - Parse relative dates: "tomorrow" = {tomorrow}, "next week" = 7 days from today
         - If user mentions "return", "round trip", or a return date, set trip_type: "round-trip"
+        - If trip_type is explicitly mentioned by the user, set trip_type_source: "explicit"
+        - If you infer the trip type from context (e.g., defaulting to one-way), set trip_type_source: "inferred"
         - If trip_type is "round-trip" but return_date is not specified, keep return_date as null
         - If passengers is not specified, leave it null (we will ask)
         - Use conversation context to remember previously mentioned information
@@ -134,10 +142,12 @@ class FlightInfoCollector:
         """Identify additional preferred info to collect before searching (trip_type/return_date, passengers)."""
         missing = []
         trip_type = flight_info.get("trip_type")
+        trip_type_source = flight_info.get("trip_type_source")
         return_date = flight_info.get("return_date")
         passengers = flight_info.get("passengers")
         
-        if not trip_type:
+        # Ask for trip type if not explicitly confirmed by user
+        if not trip_type or (trip_type_source != "explicit"):
             missing.append("trip_type")
         elif trip_type == "round-trip" and not return_date:
             missing.append("return_date")
