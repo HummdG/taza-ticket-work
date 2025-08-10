@@ -709,8 +709,8 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
         from .conversation_router import should_handle_as_flight_booking, should_collect_flight_info, analyze_flight_request_completeness
         from ..agents.general_conversation_agent import handle_general_conversation
         
-        # Get conversation context from memory
-        conversation_context = memory_manager.get_conversation_context(user_id)
+        # Get conversation context from memory (use deeper history for better continuity)
+        conversation_context = memory_manager.get_conversation_context(user_id, max_recent=12)
         
         # Check if user is currently collecting flight information
         is_collecting = memory_manager.is_collecting_flight_info(user_id)
@@ -720,23 +720,27 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
             response = handle_flight_info_collection(user_message, user_id, conversation_context)
             message_type = "flight_collection"
         
-        # Check if this is a complete flight booking request
-        elif should_handle_as_flight_booking(user_message, conversation_context):
-            print(f"🛫 Routing to flight booking agent for user: {user_id}")
-            response = process_flight_request(user_message, user_id, conversation_context)
-            message_type = "flight"
-        
-        # Check if this is a partial flight request that needs more info
-        elif should_collect_flight_info(user_message, conversation_context):
-            print(f"📝 Starting flight info collection for user: {user_id}")
-            response = start_flight_info_collection(user_message, user_id, conversation_context)
-            message_type = "flight_collection"
-        
-        # Default to general conversation
         else:
-            print(f"💬 Routing to general conversation agent for user: {user_id}")
-            response = handle_general_conversation(user_message, user_id, conversation_context)
-            message_type = "general"
+            # Analyze intent and completeness first to avoid breaking on missing info
+            has_intent, is_complete, _extracted = analyze_flight_request_completeness(user_message, conversation_context)
+            
+            # Start or continue info collection if intent is present but info is incomplete
+            if has_intent and not is_complete:
+                print(f"📝 Starting flight info collection for user: {user_id}")
+                response = start_flight_info_collection(user_message, user_id, conversation_context)
+                message_type = "flight_collection"
+            
+            # Handle complete flight booking requests
+            elif has_intent and is_complete:
+                print(f"🛫 Routing to flight booking agent for user: {user_id}")
+                response = process_flight_request(user_message, user_id, conversation_context)
+                message_type = "flight"
+            
+            # Default to general conversation
+            else:
+                print(f"💬 Routing to general conversation agent for user: {user_id}")
+                response = handle_general_conversation(user_message, user_id, conversation_context)
+                message_type = "general"
         
         # Generate voice response if original was a voice message
         voice_file_url = None

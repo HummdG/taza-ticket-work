@@ -97,20 +97,52 @@ class DynamoDBConversationMemory:
                 Limit=max_recent
             )
             
-            if not response.get('Items'):
-                return ""
+            context_lines = []
+            items = response.get('Items', []) if response else []
             
-            context_lines = ["Previous conversation:"]
+            if items:
+                context_lines.append("Previous conversation:")
+                # Reverse to show chronological order (oldest to newest)
+                for item in reversed(items):
+                    user_msg = item.get('user_message', '')[:200]  # Limit length
+                    bot_msg = item.get('bot_response', '')[:300]   # Limit length
+                    if user_msg and bot_msg:
+                        context_lines.append(f"User: {user_msg}")
+                        context_lines.append(f"Assistant: {bot_msg}")
             
-            # Reverse to show chronological order (oldest to newest)
-            for item in reversed(response['Items']):
-                user_msg = item.get('user_message', '')[:200]  # Limit length
-                bot_msg = item.get('bot_response', '')[:300]   # Limit length
-                if user_msg and bot_msg:
-                    context_lines.append(f"User: {user_msg}")
-                    context_lines.append(f"Assistant: {bot_msg}")
+            # Include ongoing flight info collection state for better continuity
+            try:
+                collection_state = self.get_flight_collection_state()
+                collected_info = collection_state.get("collected_info", {}) if isinstance(collection_state, dict) else {}
+                if collection_state.get("collecting") or any(collected_info.values()):
+                    context_lines.append("")
+                    context_lines.append("Current flight info being collected:")
+                    from_city = collected_info.get("from_city") or "Unknown"
+                    to_city = collected_info.get("to_city") or "Unknown"
+                    dep_date = collected_info.get("departure_date") or "Unknown"
+                    ret_date = collected_info.get("return_date") or "Unknown"
+                    passengers = collected_info.get("passengers") or "Unknown"
+                    context_lines.append(f"From: {from_city}; To: {to_city}; Departure: {dep_date}; Return: {ret_date}; Passengers: {passengers}")
+            except Exception as e:
+                print(f"⚠️ Error appending collection state to context: {e}")
             
-            return "\n".join(context_lines)
+            # Include recent flight context (e.g., last search) if available
+            try:
+                flight_ctx = self.get_flight_context()
+                last_search = flight_ctx.get("last_search") if isinstance(flight_ctx, dict) else None
+                if last_search:
+                    context_lines.append("")
+                    context_lines.append("Recent flight context:")
+                    from_city = last_search.get("from_city") or ""
+                    to_city = last_search.get("to_city") or ""
+                    dep = last_search.get("departure_date") or ""
+                    ret = last_search.get("return_date") or ""
+                    pax = last_search.get("passengers") or ""
+                    context_lines.append(f"Last search → From {from_city} to {to_city} on {dep}{' return ' + ret if ret else ''} for {pax} passenger(s)")
+            except Exception as e:
+                print(f"⚠️ Error appending flight context to context: {e}")
+            
+            return "\n".join(context_lines) if context_lines else ""
             
         except Exception as e:
             print(f"⚠️ Error getting conversation context from DynamoDB: {e}")
