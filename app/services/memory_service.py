@@ -11,6 +11,7 @@ from botocore.exceptions import ClientError, NoCredentialsError
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from decimal import Decimal
 
 load_dotenv()
 
@@ -62,11 +63,24 @@ class DynamoDBConversationMemory:
             timestamp = datetime.now()
             
             # Serialize context data
-            context_json = json.dumps(current_context)
+            def _json_safe(value):
+                if isinstance(value, Decimal):
+                    # Convert to int if integral, else float
+                    return int(value) if value % 1 == 0 else float(value)
+                if isinstance(value, dict):
+                    return {k: _json_safe(v) for k, v in value.items()}
+                if isinstance(value, list):
+                    return [_json_safe(v) for v in value]
+                if isinstance(value, tuple):
+                    return tuple(_json_safe(v) for v in value)
+                return value
+
+            safe_context = _json_safe(current_context)
+            context_json = json.dumps(safe_context)
             if len(context_json) > 10000:  # Limit context size
                 print("⚠️ Flight context too large, truncating...")
                 context_json = context_json[:10000]
-                current_context = json.loads(context_json)
+                safe_context = json.loads(context_json)
             
             # Store flight context
             self.table.put_item(Item={
@@ -74,7 +88,7 @@ class DynamoDBConversationMemory:
                 'sort_key': 'flight_context',
                 'data_type': 'flight_context',
                 'timestamp': timestamp.isoformat(),
-                'context_data': current_context,
+                'context_data': safe_context,
                 'ttl': int((timestamp + timedelta(hours=24)).timestamp())
             })
             

@@ -444,12 +444,10 @@ def analyze_bulk_search_results(state: FlightBookingState) -> FlightBookingState
  
  ❓ Would you like me to search for more options or help you with booking?"""
             
-            # Generate and append booking quote reference
+            # Generate and persist booking quote reference (separate message is sent by sender layer)
             try:
                 quote_code = generate_quote_reference_for_offering(state, global_cheapest_flight)
                 state["quote_reference"] = quote_code
-                response = append_booking_instructions(response, quote_code)
-                # Persist to memory for later booking
                 try:
                     from ..services.memory_service import memory_manager
                     memory_manager.add_flight_context(state.get("user_id", "unknown"), {
@@ -596,11 +594,17 @@ def find_cheapest_flight(state: FlightBookingState) -> FlightBookingState:
                 print("✅ Using combined round-trip extracted from a single offering")
                 state["cheapest_flight"] = best_rt_offering
                 response = format_flight_response(best_rt_details)
-                # Append booking
+                # Persist quote reference for later separate message
                 try:
                     quote_code = generate_quote_reference_for_offering(state, best_rt_offering)
                     state["quote_reference"] = quote_code
-                    response = append_booking_instructions(response, quote_code)
+                    try:
+                        from ..services.memory_service import memory_manager
+                        memory_manager.add_flight_context(state.get("user_id", "unknown"), {
+                            "last_quote_reference": quote_code
+                        })
+                    except Exception as _:
+                        pass
                 except Exception as _:
                     pass
                 state["response_text"] = response
@@ -674,7 +678,6 @@ def process_true_roundtrip(state: FlightBookingState, outbound_offering: Dict, r
         try:
             quote_code = generate_quote_reference_for_roundtrip(state, outbound_offering, return_offering)
             state["quote_reference"] = quote_code
-            response = append_booking_instructions(response, quote_code)
             # Persist to memory for later booking
             try:
                 from ..services.memory_service import memory_manager
