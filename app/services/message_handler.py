@@ -819,6 +819,12 @@ def _process_message_with_chatcompletion(user_message: str, user_id: str, conver
         # INTELLIGENT FLIGHT SEARCH DETECTION - Check if user has provided enough info to search
         flight_info = _extract_flight_info_from_conversation(user_message, conversation_context, detected_language)
         
+        # Check if user is starting a completely new flight request
+        if _is_new_flight_request(user_message, conversation_context, detected_language):
+            print("🔄 New flight request detected - clearing previous context")
+            memory_manager.clear_flight_context(user_id)
+            memory_manager.clear_flight_collection_state(user_id)
+        
         if _has_enough_info_to_search(flight_info):
             print("🎯 Detected complete flight info - triggering search")
             try:
@@ -831,29 +837,34 @@ def _process_message_with_chatcompletion(user_message: str, user_id: str, conver
         
         # Use ChatCompletion for intelligent conversation handling
         system_prompt = f"""
-        You are TazaTicket's intelligent travel assistant. Help users find flights in a natural, ChatGPT-like conversation.
+        You are TazaTicket's intelligent travel assistant. Help users find flights naturally.
         
         CRITICAL INSTRUCTIONS:
         1. ALWAYS respond in the user's detected language: {detected_language}
-        2. Be smart about context - don't ask for info already mentioned
-        3. Be conversational and friendly, not robotic
-        4. Extract information naturally from conversation
-        5. Don't repeat questions unnecessarily
-        6. If user provides trip duration (like "20 days"), acknowledge it and confirm dates
-        7. When you have enough info, confidently say you're searching for flights
+        2. If user mentions completely different cities than before, treat it as a NEW request
+        3. Be conversational and don't repeat questions
+        4. ALWAYS ask about trip type (round-trip or one-way) before searching
+        5. Don't mix up different flight requests
         
         CONVERSATION ANALYSIS:
-        From the conversation history: {conversation_context}
-        User just said: {user_message}
+        Previous conversation: {conversation_context}
+        Current message: {user_message}
         
-        GUIDELINES:
-        - If origin, destination, and date are clear from context, don't ask again
-        - For round-trip, confirm return date or calculate from duration mentioned
-        - Default to 1 passenger unless specified otherwise
-        - Be helpful and efficient, not repetitive
-        - Show you're listening by referencing what they've already told you
+        REQUIRED INFO BEFORE SEARCHING:
+        - Origin city/airport ✈️
+        - Destination city/airport 🎯
+        - Departure date 📅
+        - Trip type (round-trip or one-way) 🔄 ← MUST ASK THIS
+        - If round-trip: return date or duration
         
-        RESPOND NATURALLY in {detected_language}. Build on what's already been discussed.
+        IMPORTANT RULES:
+        - If user says "New York to Milan" after talking about other cities, this is a NEW request
+        - Don't carry over irrelevant details from previous conversations
+        - ALWAYS confirm trip type before searching: "Is this a round-trip or one-way flight?"
+        - If round-trip, ask for return date or duration
+        - Only search when you have ALL required information
+        
+        RESPOND NATURALLY in {detected_language}.
         """
         
         # Create the conversation
@@ -878,7 +889,7 @@ def _process_message_with_chatcompletion(user_message: str, user_id: str, conver
 
 def _extract_flight_info_from_conversation(user_message: str, conversation_context: str, detected_language: str) -> dict:
     """
-    Extract flight information from the entire conversation context using AI
+    Extract flight information prioritizing the current message over conversation context
     """
     try:
         from langchain_openai import ChatOpenAI
@@ -887,27 +898,39 @@ def _extract_flight_info_from_conversation(user_message: str, conversation_conte
         
         extractor_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
         
-        extraction_prompt = f"""
-        Extract flight booking information from this conversation. Return a JSON object with the fields you can identify.
+        # First try to extract from current message only
+        current_message_prompt = f"""
+        Extract flight booking information from this CURRENT MESSAGE ONLY. Return a JSON object.
         
-        Fields to extract:
+        Current message: "{user_message}"
+        Language: {detected_language}
+        
+        Extract only what is mentioned in this CURRENT message:
         - origin_city: departure city/airport (string)
         - destination_city: arrival city/airport (string)  
         - departure_date: departure date in YYYY-MM-DD format (string)
         - return_date: return date if round-trip in YYYY-MM-DD format (string or null)
         - passengers: number of passengers (integer, default 1)
-        - trip_type: "round-trip" or "one-way" (string)
+        - trip_type: "round-trip" or "one-way" (string) - look for keywords like "round trip", "return", "one way", "round-trip", etc.
         - duration_days: if user mentions duration like "20 days" (integer or null)
         
-        Conversation context: {conversation_context}
-        Latest message: {user_message}
+        TRIP TYPE DETECTION:
+        - "round trip", "return trip", "round-trip", "واپسی", "راؤنٹریپ" = "round-trip"
+        - "one way", "one-way", "single", "ایک طرفہ" = "one-way"
+        - Duration mentions like "20 days", "2 weeks" usually indicate round-trip
         
-        Return ONLY valid JSON. If information is missing, use null.
+        IMPORTANT: 
+        - Only extract information from the current message
+        - If user mentions completely different cities, use those (ignore previous context)
+        - If no specific info in current message, return null for that field
+        - Be smart about detecting trip type from context clues
+        
+        Return ONLY valid JSON.
         """
         
         messages = [
-            SystemMessage(content=extraction_prompt),
-            HumanMessage(content=f"Extract flight info from: {user_message}")
+            SystemMessage(content=current_message_prompt),
+            HumanMessage(content=f"Current message: {user_message}")
         ]
         
         result = extractor_llm.invoke(messages)
@@ -920,9 +943,55 @@ def _extract_flight_info_from_conversation(user_message: str, conversation_conte
             response_text = response_text.split("```")[1].split("```")[0]
         
         try:
-            flight_info = json.loads(response_text)
-            print(f"🎯 Extracted flight info: {flight_info}")
-            return flight_info
+            current_info = json.loads(response_text)
+            print(f"🎯 Current message info: {current_info}")
+            
+            # If current message has complete new flight info, use it entirely
+            if current_info.get("origin_city") and current_info.get("destination_city"):
+                print("✈️ New complete flight request detected - using current message only")
+                return current_info
+            
+            # Otherwise, merge with conversation context carefully
+            if conversation_context:
+                context_prompt = f"""
+                Merge flight information from conversation context with current message.
+                
+                Conversation context: {conversation_context}
+                Current message: {user_message}
+                Current message info: {current_info}
+                
+                Rules:
+                1. If current message has new cities, completely replace old cities
+                2. If current message has new date, replace old date
+                3. Only fill missing fields from context if current message doesn't contradict
+                4. Always prioritize current message over context
+                
+                Return complete flight info as JSON.
+                """
+                
+                context_messages = [
+                    SystemMessage(content=context_prompt),
+                    HumanMessage(content=f"Merge: {current_info}")
+                ]
+                
+                context_result = extractor_llm.invoke(context_messages)
+                context_response = context_result.content.strip()
+                
+                if "```json" in context_response:
+                    context_response = context_response.split("```json")[1].split("```")[0]
+                elif "```" in context_response:
+                    context_response = context_response.split("```")[1].split("```")[0]
+                
+                try:
+                    merged_info = json.loads(context_response)
+                    print(f"🔄 Merged info: {merged_info}")
+                    return merged_info
+                except json.JSONDecodeError:
+                    print(f"⚠️ Could not parse merged info, using current only")
+                    return current_info
+            
+            return current_info
+            
         except json.JSONDecodeError:
             print(f"⚠️ Could not parse flight info JSON: {response_text}")
             return {}
@@ -932,10 +1001,64 @@ def _extract_flight_info_from_conversation(user_message: str, conversation_conte
         return {}
 
 
+def _is_new_flight_request(user_message: str, conversation_context: str, detected_language: str) -> bool:
+    """
+    Detect if user is starting a completely new flight request (different cities)
+    """
+    try:
+        from langchain_openai import ChatOpenAI
+        from langchain_core.messages import SystemMessage, HumanMessage
+        
+        detector_llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+        
+        detection_prompt = f"""
+        Analyze if the user is starting a COMPLETELY NEW flight request with different cities.
+        
+        Conversation context: {conversation_context}
+        Current message: {user_message}
+        
+        Return "YES" if:
+        - User mentions completely different origin/destination cities than before
+        - User is clearly starting a new flight search
+        - User mentions cities that contradict previous conversation
+        
+        Return "NO" if:
+        - User is continuing the same conversation
+        - User is adding details to existing request
+        - User is asking about dates/passengers for same route
+        
+        Examples of NEW requests:
+        - Previous: "London to Paris" → Current: "New York to Milan" = YES
+        - Previous: "Lahore to Athens" → Current: "New York to Milan" = YES
+        
+        Examples of CONTINUING:
+        - Previous: "London to Paris" → Current: "on November 5th" = NO
+        - Previous: "where to go" → Current: "New York to Milan" = NO
+        
+        Response: YES or NO only.
+        """
+        
+        messages = [
+            SystemMessage(content=detection_prompt),
+            HumanMessage(content=user_message)
+        ]
+        
+        result = detector_llm.invoke(messages)
+        response = result.content.strip().upper()
+        
+        return response == "YES"
+        
+    except Exception as e:
+        print(f"⚠️ Error detecting new flight request: {e}")
+        return False
+
+
 def _has_enough_info_to_search(flight_info: dict) -> bool:
     """
     Check if we have enough information to search for flights
+    ALWAYS requires trip type to be specified before searching
     """
+    # Basic required fields
     required_fields = ["origin_city", "destination_city", "departure_date"]
     
     # Check if all required fields are present and not null/empty
@@ -943,10 +1066,15 @@ def _has_enough_info_to_search(flight_info: dict) -> bool:
         if not flight_info.get(field):
             return False
     
-    # If it's round-trip, we need return date or duration
+    # CRITICAL: Trip type must always be specified
+    if not flight_info.get("trip_type"):
+        return False
+    
+    # If it's round-trip, we also need return date or duration
     if flight_info.get("trip_type") == "round-trip":
         return flight_info.get("return_date") or flight_info.get("duration_days")
     
+    # For one-way, we have everything we need
     return True
 
 
@@ -1026,6 +1154,10 @@ def _generate_multilingual_response(english_text: str, target_language: str, use
         Keep the tone friendly and natural for a travel assistant.
         Preserve any emojis and maintain the conversational style.
         
+        SPECIAL TERMS:
+        - "round-trip" = واپسی کا ٹکٹ / راؤنڈ ٹرپ (Urdu), رحلة ذهاب وإياب (Arabic)
+        - "one-way" = ایک طرفہ (Urdu), رحلة ذهاب فقط (Arabic)
+        
         English text: {english_text}
         """
         
@@ -1079,6 +1211,39 @@ def _translate_response_to_language(response_text: str, target_language: str, us
     except Exception as e:
         print(f"⚠️ Response translation failed: {e}")
         return response_text  # Fallback to original
+
+
+def _generate_trip_type_question(detected_language: str, user_id: str) -> str:
+    """
+    Generate a trip type question in the user's language
+    """
+    trip_type_questions = {
+        'en': "Is this a round-trip or one-way flight?",
+        'ur': "کیا یہ واپسی کا ٹکٹ ہے یا ایک طرفہ؟",
+        'hi': "यह राउंड-ट्रिप है या वन-वे?",
+        'ar': "هل هذه رحلة ذهاب وإياب أم ذهاب فقط؟",
+        'fr': "Est-ce un aller-retour ou un aller simple?",
+        'de': "Ist das Hin- und Rückflug oder nur Hinflug?",
+        'es': "¿Es un vuelo de ida y vuelta o solo de ida?",
+        'it': "È un volo di andata e ritorno o solo andata?",
+        'pt': "É uma viagem de ida e volta ou só ida?",
+        'tr': "Bu gidiş-dönüş mü yoksa tek yön mü?",
+        'ru': "Это билет туда-обратно или в одну сторону?",
+        'zh': "这是往返机票还是单程机票？",
+        'ja': "往復航空券ですか、それとも片道ですか？",
+        'ko': "왕복 항공권인가요, 편도인가요?"
+    }
+    
+    # Return direct translation if available
+    if detected_language in trip_type_questions:
+        return trip_type_questions[detected_language]
+    
+    # Fallback to multilingual generation
+    return _generate_multilingual_response(
+        "Is this a round-trip or one-way flight?", 
+        detected_language, 
+        user_id
+    )
 
 
 # Legacy functions removed - now using ChatCompletion API for natural conversation flow
