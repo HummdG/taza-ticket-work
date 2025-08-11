@@ -502,6 +502,11 @@ class DynamoDBMemoryManager:
         memory = self.get_user_memory(user_id)
         memory.clear_flight_collection_state()
     
+    def clear_flight_context(self, user_id: str):
+        """Clear flight context for a user"""
+        memory = self.get_user_memory(user_id)
+        memory.clear_flight_context()
+    
     def cleanup_expired_memories(self):
         """DynamoDB TTL handles this automatically"""
         print("ℹ️ DynamoDB TTL handles automatic cleanup. Manual cleanup not needed.")
