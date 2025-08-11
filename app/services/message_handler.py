@@ -1027,6 +1027,9 @@ def _extract_flight_info_from_conversation(user_message: str, conversation_conte
         - passengers: number of passengers (integer, default 1)
         - trip_type: "round-trip" or "one-way" (string) - SMART DETECTION BELOW
         - duration_days: if user mentions duration like "5 days" (integer or null)
+        - date_range_start: start date for range searches in YYYY-MM-DD format (string or null)
+        - date_range_end: end date for range searches in YYYY-MM-DD format (string or null)
+        - search_type: "specific" for exact dates or "range" for date ranges (string)
         
         DATE PARSING RULES:
         - "4 نومبر" or "چار نومبر" = November 4th of CURRENT YEAR ({datetime.now().year})
@@ -1034,6 +1037,13 @@ def _extract_flight_info_from_conversation(user_message: str, conversation_conte
         - Never use past years like 2023 or 2024 unless explicitly mentioned
         - Today is {datetime.now().strftime("%B %d, %Y")}
         - IMPORTANT: Current year is {datetime.now().year}, so November 2025 is the correct future date
+        
+        DATE RANGE DETECTION:
+        - "cheapest flight in December" → date_range_start: "{datetime.now().year}-12-01", date_range_end: "{datetime.now().year}-12-31", search_type: "range"
+        - "between 6th-15th October" → date_range_start: "{datetime.now().year}-10-06", date_range_end: "{datetime.now().year}-10-15", search_type: "range"
+        - "find flights from 10th to 20th November" → date_range_start: "{datetime.now().year}-11-10", date_range_end: "{datetime.now().year}-11-20", search_type: "range"
+        - Any month/date range mentioned → set search_type to "range" and fill date_range_start/end
+        - Single specific date → set search_type to "specific" and use departure_date
         
         SMART TRIP TYPE DETECTION:
         - If duration mentioned ("5 days", "پانچ دن بعد", etc.) → ALWAYS "round-trip"
@@ -1152,17 +1162,36 @@ def _is_new_flight_request(user_message: str, conversation_context: str, detecte
 def _has_enough_info_to_search(flight_info: dict) -> bool:
     """
     Check if we have enough information to search for flights
-    Smart detection of trip type from context clues
+    Smart detection of trip type from context clues and support for date ranges
     """
-    # Basic required fields
-    required_fields = ["origin_city", "destination_city", "departure_date"]
+    # Basic required fields for all searches
+    basic_fields = ["origin_city", "destination_city"]
     
-    # Check if all required fields are present and not null/empty
-    for field in required_fields:
+    # Check if basic fields are present
+    for field in basic_fields:
         if not flight_info.get(field):
             return False
     
-    # Smart trip type detection
+    search_type = flight_info.get("search_type", "specific")
+    
+    # Handle range searches (like "cheapest flight in December")
+    if search_type == "range":
+        date_range_start = flight_info.get("date_range_start")
+        date_range_end = flight_info.get("date_range_end")
+        
+        if date_range_start and date_range_end:
+            print(f"🎯 Date range search: {date_range_start} to {date_range_end}")
+            return True
+        else:
+            print("🎯 Range search missing date range - need start/end dates")
+            return False
+    
+    # Handle specific date searches (original logic)
+    if not flight_info.get("departure_date"):
+        print("🎯 Missing departure date for specific search")
+        return False
+    
+    # Smart trip type detection for specific searches
     trip_type = flight_info.get("trip_type")
     duration_days = flight_info.get("duration_days")
     return_date = flight_info.get("return_date")
