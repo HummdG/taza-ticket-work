@@ -879,12 +879,32 @@ def _process_message_with_chatcompletion(user_message: str, user_id: str, conver
                 # Mark for broadcasting (both text and voice will show reference)
                 memory_manager.add_flight_context(user_id, {"broadcast_booking_reference_once": quote_ref})
                 return _generate_multilingual_response(
-                    "Please quote the following booking reference number to the number below:",
+                    f"To book this flight, please call +92 3 1 2 8 5 6 7 4 4 2 and quote reference: {quote_ref}",
                     detected_language, user_id
                 )
             else:
+                # No quote reference found - check if user just received flight results
+                print("🔍 No quote reference found for booking - checking recent context")
+                
+                # Check if there was a recent flight search in conversation
+                if conversation_context and any(keyword in conversation_context.lower() for keyword in ["price", "flight", "eur", "usd"]):
+                    print("📋 Found recent flight results in context - user likely wants to book those")
+                    return _generate_multilingual_response(
+                        "To book the flight I just showed you, please call +92 3 1 2 8 5 6 7 4 4 2 and mention your flight details. Our agent will help you complete the booking.",
+                        detected_language, user_id
+                    )
+                
+                # Try to search for flights using context
+                flight_info = _extract_flight_info_from_conversation(user_message, conversation_context, detected_language)
+                
+                if _has_enough_info_to_search(flight_info):
+                    print("🎯 Has enough info - searching flights to generate booking reference")
+                    flight_response = _handle_flight_search(user_message, user_id, conversation_context, detected_language)
+                    if flight_response:
+                        return flight_response
+                
                 return _generate_multilingual_response(
-                    "I'd be happy to help you book! First, let me search for available flights. Can you confirm your travel details?",
+                    "I'd be happy to help you book! First, I need to find available flights. Could you please tell me your departure city, destination, and travel date?",
                     detected_language, user_id
                 )
         
@@ -1002,7 +1022,7 @@ def _extract_flight_info_from_conversation(user_message: str, conversation_conte
         
         extractor_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
         
-        # Enhanced extraction that considers both current message and smart context merging
+        #         Enhanced extraction that considers both current message and smart context merging
         current_message_prompt = f"""
         Extract flight booking information from this message. Return a JSON object.
         
@@ -1010,19 +1030,22 @@ def _extract_flight_info_from_conversation(user_message: str, conversation_conte
         Language: {detected_language}
         Conversation context: {conversation_context}
         
+        ⚠️ CRITICAL DATE RULE - YEAR MUST BE {datetime.now().year} ⚠️
+        - Today is {datetime.now().strftime("%Y-%m-%d")} 
+        - Current year is {datetime.now().year}
+        - NEVER use 2023 or 2024 for dates
+        - "چار نومبر" = November 4, {datetime.now().year} (NOT 2023!)
+        
         SMART EXTRACTION RULES:
         1. If current message mentions DURATION (like "5 days", "پانچ دن"), automatically set trip_type to "round-trip"
         2. If current message has both cities and date with duration, that's a COMPLETE round-trip request
         3. Be intelligent about context - if user just clarified duration but cities are in previous messages, merge intelligently
         4. If user is frustrated/repeating, they likely provided complete info already
         
-        TODAY'S DATE: {datetime.now().strftime("%Y-%m-%d")}
-        CURRENT YEAR: {datetime.now().year}
-        
         Extract and merge intelligently:
         - origin_city: departure city/airport (string) - check both current message and context
         - destination_city: arrival city/airport (string) - check both current message and context
-        - departure_date: departure date in YYYY-MM-DD format (string) - ALWAYS use current year {datetime.now().year} or next year if month has passed
+        - departure_date: departure date in YYYY-MM-DD format (string) - ⚠️ MUST BE {datetime.now().year} YEAR ⚠️
         - return_date: return date if round-trip in YYYY-MM-DD format (string or null)
         - passengers: number of passengers (integer, default 1)
         - trip_type: "round-trip" or "one-way" (string) - SMART DETECTION BELOW
