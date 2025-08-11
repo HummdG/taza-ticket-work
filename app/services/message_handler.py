@@ -908,15 +908,35 @@ def _process_message_with_chatcompletion(user_message: str, user_id: str, conver
                     detected_language, user_id
                 )
         
-        # INTELLIGENT FLIGHT SEARCH DETECTION - Check if user has provided enough info to search
-        flight_info = _extract_flight_info_from_conversation(user_message, conversation_context, detected_language)
-        
-        # Only clear context if user explicitly mentions completely different cities
-        # Be much more conservative about clearing context to avoid frustrating users
+        # Check if this is a new flight request FIRST and clear context if needed
         if _is_truly_new_flight_request(user_message, conversation_context, detected_language):
             print("🔄 Completely new flight request detected - clearing previous context")
             memory_manager.clear_flight_context(user_id)
             memory_manager.clear_flight_collection_state(user_id)
+            # Get fresh conversation context after clearing
+            conversation_context = memory_manager.get_conversation_context(user_id, max_recent=12)
+        
+        # INTELLIGENT FLIGHT SEARCH DETECTION - Check if user has provided enough info to search
+        # Get latest flight context to help with extraction
+        latest_flight_context = memory_manager.get_flight_context(user_id)
+        latest_request = None
+        if isinstance(latest_flight_context, dict):
+            latest_request = latest_flight_context.get("latest_flight_request")
+        
+        flight_info = _extract_flight_info_from_conversation(user_message, conversation_context, detected_language, latest_request)
+        
+        # If we extracted cities from the current message, store them as the latest flight request
+        if flight_info.get("origin_city") and flight_info.get("destination_city"):
+            latest_flight_context = {
+                "latest_flight_request": {
+                    "origin_city": flight_info.get("origin_city"),
+                    "destination_city": flight_info.get("destination_city"),
+                    "trip_type": flight_info.get("trip_type"),
+                    "requested_at": datetime.now().isoformat()
+                }
+            }
+            memory_manager.add_flight_context(user_id, latest_flight_context)
+            print(f"💾 Stored latest flight request: {flight_info.get('origin_city')} → {flight_info.get('destination_city')}")
         
         if _has_enough_info_to_search(flight_info):
             print("🎯 Detected complete flight info - triggering search")
@@ -1010,7 +1030,7 @@ def _process_message_with_chatcompletion(user_message: str, user_id: str, conver
         )
 
 
-def _extract_flight_info_from_conversation(user_message: str, conversation_context: str, detected_language: str) -> dict:
+def _extract_flight_info_from_conversation(user_message: str, conversation_context: str, detected_language: str, latest_request: Optional[dict] = None) -> dict:
     """
     Extract flight information prioritizing the current message over conversation context
     """
@@ -1029,6 +1049,16 @@ def _extract_flight_info_from_conversation(user_message: str, conversation_conte
         Current message: "{user_message}"
         Language: {detected_language}
         Conversation context: {conversation_context}
+        
+        LATEST FLIGHT REQUEST PRIORITY:
+        If the current message doesn't contain cities but mentions dates/duration/trip details,
+        use the latest flight request cities if available.
+        Latest flight request: {latest_request if latest_request else "None"}
+        
+        EXTRACTION PRIORITY:
+        1. If current message has cities → use those cities
+        2. If current message has no cities but has dates/duration → use latest_flight_request cities
+        3. If both current message and latest_request have cities → prefer current message
         
         ⚠️ CRITICAL DATE RULE - YEAR MUST BE {datetime.now().year} ⚠️
         - Today is {datetime.now().strftime("%Y-%m-%d")} 
@@ -1074,10 +1104,12 @@ def _extract_flight_info_from_conversation(user_message: str, conversation_conte
         - If one-way keywords ("ایک طرفہ", "one-way") → "one-way"
         - If user asks for return ticket → "round-trip"
         
-        CONTEXT MERGING:
-        - If current message mentions duration but not cities, get cities from context
-        - If current message clarifies trip type, update from context
-        - If user seems to be repeating themselves, merge all available info
+        CONTEXT MERGING RULES:
+        ⚠️ CRITICAL: When current message doesn't mention cities, ONLY use the MOST RECENT flight cities from context.
+        - If current message mentions duration/date but not cities, get the LATEST cities from conversation context
+        - If current message clarifies trip type, update from RECENT context only
+        - NEVER mix old flight requests with new ones
+        - Always prioritize the most recent flight request in the conversation
         
         Return ONLY valid JSON.
         """
