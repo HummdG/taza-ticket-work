@@ -823,24 +823,41 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
                     response = handle_general_conversation(user_message, user_id, conversation_context)
                     message_type = "general"
         
+        # Ensure we never send an empty response (Twilio 400 guard)
+        if not isinstance(response, str):
+            response = str(response or "")
+        if not response.strip():
+            response = "✈️ To get started, please tell me your departure city, destination, and date."
+        
         # Generate voice response if original was a voice message
         voice_file_url = None
         if is_voice_message and response:
             print(f"🎤 Generating voice response in language: {detected_language}")
-            
-            # Use AWS services for voice generation
-            voice_file_path = generate_voice_response(response, detected_language, user_id)
+            try:
+                # Use AWS services for voice generation
+                voice_file_path = generate_voice_response(response, detected_language, user_id)
+            except Exception as gen_err:
+                print(f"❌ Voice generation threw: {gen_err}")
+                voice_file_path = None
             
             if voice_file_path:
-                # Upload to accessible URL
-                voice_file_url = upload_voice_file_to_accessible_url(voice_file_path, user_id)
-                
-                # Clean up local temp file after upload
                 try:
-                    os.unlink(voice_file_path)
-                    print(f"🧹 Cleaned up temporary file: {voice_file_path}")
-                except Exception as cleanup_error:
-                    print(f"⚠️ Could not clean up temp file: {cleanup_error}")
+                    # Upload to accessible URL
+                    voice_file_url = upload_voice_file_to_accessible_url(voice_file_path, user_id)
+                    if not voice_file_url:
+                        print("⚠️ Voice upload returned no URL; falling back to text-only reply")
+                    
+                    # Clean up local temp file after upload
+                    try:
+                        os.unlink(voice_file_path)
+                        print(f"🧹 Cleaned up temporary file: {voice_file_path}")
+                    except Exception as cleanup_error:
+                        print(f"⚠️ Could not clean up temp file: {cleanup_error}")
+                except Exception as upload_err:
+                    print(f"❌ Voice upload error: {upload_err}")
+                    voice_file_url = None
+            else:
+                print("⚠️ No voice file generated; responding with text only")
         
         # Save the conversation to memory
         message_identifier = f"🎤 [Voice]: {user_message}" if is_voice_message else user_message
