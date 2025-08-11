@@ -666,14 +666,36 @@ def _is_transcription_garbled(text: str) -> bool:
         # Check for patterns that indicate transcription errors
         garbled_patterns = [
             # Tamil/Telugu gibberish patterns often seen in bad transcriptions
-            "ஆமேல்", "ஒருசு", "ஜானாச்சாரம்", "கொட்டுக்கிடப்பட்டான்",
+            "ஆமேல்", "ஒருசு", "ஜானாச்சாரம்", "கொட்டুக்கிடப்பட்டான்",
             # Other common transcription error patterns
-            "asdf", "qwerty", "zxcv"
+            "asdf", "qwerty", "zxcv",
+            # Common garbled patterns from Whisper
+            "kataru", "erũs", "sũr", "ŵŵ"
         ]
         
         for pattern in garbled_patterns:
             if pattern in text:
                 return True
+        
+        # Check for excessive use of unusual Unicode characters (diacritics)
+        import unicodedata
+        unusual_chars = 0
+        for char in text:
+            if unicodedata.category(char) in ['Mn', 'Mc']:  # Nonspacing/spacing marks (diacritics)
+                unusual_chars += 1
+        
+        # If more than 20% of characters are unusual Unicode marks, likely garbled
+        if len(text) > 0 and (unusual_chars / len(text)) > 0.2:
+            return True
+        
+        # Check for mixed scripts that don't make sense
+        has_latin = any('\u0041' <= c <= '\u007A' or '\u0041' <= c <= '\u005A' for c in text)
+        has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
+        has_unusual_latin = any(c in 'ũõñŵŕẽ' for c in text)
+        
+        # If we have unusual Latin characters with no clear language pattern, likely garbled
+        if has_unusual_latin and not has_arabic:
+            return True
                 
         return False
         
@@ -869,9 +891,10 @@ def _process_message_with_chatcompletion(user_message: str, user_id: str, conver
         # INTELLIGENT FLIGHT SEARCH DETECTION - Check if user has provided enough info to search
         flight_info = _extract_flight_info_from_conversation(user_message, conversation_context, detected_language)
         
-        # Check if user is starting a completely new flight request
-        if _is_new_flight_request(user_message, conversation_context, detected_language):
-            print("🔄 New flight request detected - clearing previous context")
+        # Only clear context if user explicitly mentions completely different cities
+        # Be much more conservative about clearing context to avoid frustrating users
+        if _is_truly_new_flight_request(user_message, conversation_context, detected_language):
+            print("🔄 Completely new flight request detected - clearing previous context")
             memory_manager.clear_flight_context(user_id)
             memory_manager.clear_flight_collection_state(user_id)
         
@@ -880,8 +903,34 @@ def _process_message_with_chatcompletion(user_message: str, user_id: str, conver
             try:
                 # Directly search for flights
                 flight_response = _handle_flight_search(user_message, user_id, conversation_context, detected_language)
-                if flight_response and any(word in flight_response.lower() for word in ["flight", "price", "eur", "usd"]):
-                    return flight_response
+                print(f"🔍 Flight search response length: {len(flight_response) if flight_response else 0}")
+                print(f"🔍 Flight search response preview: {flight_response[:200] if flight_response else 'None'}...")
+                
+                # If we get a substantial response from flight search, return it
+                # Don't be too restrictive about keywords - trust the agent's response
+                if flight_response and len(flight_response.strip()) > 50:
+                    # Check if it's actually a flight result vs an error/question
+                    response_lower = flight_response.lower()
+                    
+                    # Keywords that indicate actual flight results
+                    result_indicators = ["flight", "price", "eur", "usd", "airline", "departure", "arrival", "book", "quote", "ref"]
+                    
+                    # Keywords that indicate it's asking for more info (bad)
+                    question_indicators = ["could you", "please", "need to know", "tell me", "which", "when", "where"]
+                    
+                    has_results = any(keyword in response_lower for keyword in result_indicators)
+                    is_question = any(keyword in response_lower for keyword in question_indicators)
+                    
+                    if has_results and not is_question:
+                        print("✅ Flight search returned actual results")
+                        return flight_response
+                    elif is_question:
+                        print("⚠️ Flight search returned question instead of results - falling through to chat completion")
+                    else:
+                        print("🤔 Flight search response unclear - checking length and content")
+                        # If it's a long response, probably contains useful info
+                        if len(flight_response.strip()) > 100:
+                            return flight_response
             except Exception as e:
                 print(f"⚠️ Flight search failed: {e}")
         
@@ -891,38 +940,34 @@ def _process_message_with_chatcompletion(user_message: str, user_id: str, conver
         
         CRITICAL INSTRUCTIONS:
         1. ALWAYS respond in the user's detected language: {detected_language}
-        2. If user mentions completely different cities than before, treat it as a NEW request
-        3. Be conversational and don't repeat questions
-        4. ALWAYS ask about trip type (round-trip or one-way) before searching
-        5. Don't mix up different flight requests
-        6. If user seems frustrated or mentions language issues, acknowledge and help
+        2. Be conversational and helpful, not robotic
+        3. If user provides complete flight details, acknowledge and search (don't ask redundant questions)
+        4. If user seems frustrated, be understanding and helpful
         
         CONVERSATION ANALYSIS:
         Previous conversation: {conversation_context}
         Current message: {user_message}
+        Extracted flight info: {flight_info}
         
         SPECIAL HANDLING:
-        - If user mentions "لاہور" (Lahore) or similar, extract it as origin city
-        - If user seems frustrated about language detection, acknowledge and continue in their language
+        - If user seems frustrated about language issues or repeated questions, acknowledge and help
         - If user says they're speaking one language but system detected another, trust the user
-        - Don't keep asking for information the user already provided
+        - Don't keep asking for information the user already provided in this conversation
+        - If user mentions duration (like "5 days"), that clearly means round-trip
         
-        REQUIRED INFO BEFORE SEARCHING:
-        - Origin city/airport ✈️
-        - Destination city/airport 🎯
-        - Departure date 📅
-        - Trip type (round-trip or one-way) 🔄 ← MUST ASK THIS
-        - If round-trip: return date or duration
+        SMART COLLECTION:
+        - Only ask for missing critical information
+        - If user mentions round-trip with duration, don't ask for trip type again
+        - If user provides cities and dates with duration, that's complete info for round-trip
+        - Be smart about inferring trip type from context
         
         IMPORTANT RULES:
-        - If user says "New York to Milan" after talking about other cities, this is a NEW request
-        - Don't carry over irrelevant details from previous conversations
-        - ALWAYS confirm trip type before searching: "Is this a round-trip or one-way flight?"
-        - If round-trip, ask for return date or duration
-        - Only search when you have ALL required information
-        - Be helpful and understanding, not repetitive
+        - Don't ask redundant questions that frustrate users
+        - If flight search failed to return results, help collect any truly missing info
+        - Be understanding if user is repeating themselves
+        - Acknowledge what they've already told you
         
-        RESPOND NATURALLY in {detected_language}.
+        RESPOND NATURALLY and HELPFULLY in {detected_language}.
         """
         
         # Create the conversation
@@ -956,32 +1001,39 @@ def _extract_flight_info_from_conversation(user_message: str, conversation_conte
         
         extractor_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
         
-        # First try to extract from current message only
+        # Enhanced extraction that considers both current message and smart context merging
         current_message_prompt = f"""
-        Extract flight booking information from this CURRENT MESSAGE ONLY. Return a JSON object.
+        Extract flight booking information from this message. Return a JSON object.
         
         Current message: "{user_message}"
         Language: {detected_language}
+        Conversation context: {conversation_context}
         
-        Extract only what is mentioned in this CURRENT message:
-        - origin_city: departure city/airport (string)
-        - destination_city: arrival city/airport (string)  
+        SMART EXTRACTION RULES:
+        1. If current message mentions DURATION (like "5 days", "پانچ دن"), automatically set trip_type to "round-trip"
+        2. If current message has both cities and date with duration, that's a COMPLETE round-trip request
+        3. Be intelligent about context - if user just clarified duration but cities are in previous messages, merge intelligently
+        4. If user is frustrated/repeating, they likely provided complete info already
+        
+        Extract and merge intelligently:
+        - origin_city: departure city/airport (string) - check both current message and context
+        - destination_city: arrival city/airport (string) - check both current message and context
         - departure_date: departure date in YYYY-MM-DD format (string)
         - return_date: return date if round-trip in YYYY-MM-DD format (string or null)
         - passengers: number of passengers (integer, default 1)
-        - trip_type: "round-trip" or "one-way" (string) - look for keywords like "round trip", "return", "one way", "round-trip", etc.
-        - duration_days: if user mentions duration like "20 days" (integer or null)
+        - trip_type: "round-trip" or "one-way" (string) - SMART DETECTION BELOW
+        - duration_days: if user mentions duration like "5 days" (integer or null)
         
-        TRIP TYPE DETECTION:
-        - "round trip", "return trip", "round-trip", "واپسی", "راؤنٹریپ" = "round-trip"
-        - "one way", "one-way", "single", "ایک طرفہ" = "one-way"
-        - Duration mentions like "20 days", "2 weeks" usually indicate round-trip
+        SMART TRIP TYPE DETECTION:
+        - If duration mentioned ("5 days", "پانچ دن بعد", etc.) → ALWAYS "round-trip"
+        - If return keywords ("واپسی", "return", "round-trip") → "round-trip" 
+        - If one-way keywords ("ایک طرفہ", "one-way") → "one-way"
+        - If user asks for return ticket → "round-trip"
         
-        IMPORTANT: 
-        - Only extract information from the current message
-        - If user mentions completely different cities, use those (ignore previous context)
-        - If no specific info in current message, return null for that field
-        - Be smart about detecting trip type from context clues
+        CONTEXT MERGING:
+        - If current message mentions duration but not cities, get cities from context
+        - If current message clarifies trip type, update from context
+        - If user seems to be repeating themselves, merge all available info
         
         Return ONLY valid JSON.
         """
@@ -1001,54 +1053,9 @@ def _extract_flight_info_from_conversation(user_message: str, conversation_conte
             response_text = response_text.split("```")[1].split("```")[0]
         
         try:
-            current_info = json.loads(response_text)
-            print(f"🎯 Current message info: {current_info}")
-            
-            # If current message has complete new flight info, use it entirely
-            if current_info.get("origin_city") and current_info.get("destination_city"):
-                print("✈️ New complete flight request detected - using current message only")
-                return current_info
-            
-            # Otherwise, merge with conversation context carefully
-            if conversation_context:
-                context_prompt = f"""
-                Merge flight information from conversation context with current message.
-                
-                Conversation context: {conversation_context}
-                Current message: {user_message}
-                Current message info: {current_info}
-                
-                Rules:
-                1. If current message has new cities, completely replace old cities
-                2. If current message has new date, replace old date
-                3. Only fill missing fields from context if current message doesn't contradict
-                4. Always prioritize current message over context
-                
-                Return complete flight info as JSON.
-                """
-                
-                context_messages = [
-                    SystemMessage(content=context_prompt),
-                    HumanMessage(content=f"Merge: {current_info}")
-                ]
-                
-                context_result = extractor_llm.invoke(context_messages)
-                context_response = context_result.content.strip()
-                
-                if "```json" in context_response:
-                    context_response = context_response.split("```json")[1].split("```")[0]
-                elif "```" in context_response:
-                    context_response = context_response.split("```")[1].split("```")[0]
-                
-                try:
-                    merged_info = json.loads(context_response)
-                    print(f"🔄 Merged info: {merged_info}")
-                    return merged_info
-                except json.JSONDecodeError:
-                    print(f"⚠️ Could not parse merged info, using current only")
-                    return current_info
-            
-            return current_info
+            extracted_info = json.loads(response_text)
+            print(f"🎯 Smart extracted info: {extracted_info}")
+            return extracted_info
             
         except json.JSONDecodeError:
             print(f"⚠️ Could not parse flight info JSON: {response_text}")
@@ -1059,9 +1066,10 @@ def _extract_flight_info_from_conversation(user_message: str, conversation_conte
         return {}
 
 
-def _is_new_flight_request(user_message: str, conversation_context: str, detected_language: str) -> bool:
+def _is_truly_new_flight_request(user_message: str, conversation_context: str, detected_language: str) -> bool:
     """
-    Detect if user is starting a completely new flight request (different cities)
+    Detect if user is starting a COMPLETELY NEW flight request (very conservative approach)
+    Only returns True if user explicitly mentions different cities that clearly contradict previous conversation
     """
     try:
         from langchain_openai import ChatOpenAI
@@ -1069,29 +1077,40 @@ def _is_new_flight_request(user_message: str, conversation_context: str, detecte
         
         detector_llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
         
+        # Only clear context if we're absolutely sure it's a new request
         detection_prompt = f"""
-        Analyze if the user is starting a COMPLETELY NEW flight request with different cities.
+        CRITICAL: Only return YES if the user is CLEARLY starting a completely different flight search.
+        BE VERY CONSERVATIVE - when in doubt, return NO to avoid frustrating users.
         
         Conversation context: {conversation_context}
         Current message: {user_message}
         
-        Return "YES" if:
-        - User mentions completely different origin/destination cities than before
-        - User is clearly starting a new flight search
-        - User mentions cities that contradict previous conversation
+        Return "YES" ONLY if:
+        - User explicitly mentions DIFFERENT cities that clearly contradict the previous conversation
+        - User says something like "Actually, I want to go to [different city] instead"
+        - User explicitly states they want to start a new search
         
         Return "NO" if:
-        - User is continuing the same conversation
-        - User is adding details to existing request
-        - User is asking about dates/passengers for same route
+        - User is providing more details about the same trip (dates, duration, etc.)
+        - User is continuing/clarifying the same flight request
+        - User mentions the same cities as before
+        - The message is unclear or garbled
+        - User is asking questions about the same route
+        - User is providing trip type (round-trip/one-way) for existing request
+        - ANY doubt about whether it's truly a new request
         
-        Examples of NEW requests:
-        - Previous: "London to Paris" → Current: "New York to Milan" = YES
-        - Previous: "Lahore to Athens" → Current: "New York to Milan" = YES
+        IMPORTANT: The same cities in different languages count as CONTINUING, not NEW.
+        Example: "Lahore to Milan" and "لاہور سے میلان" are the SAME request.
         
-        Examples of CONTINUING:
-        - Previous: "London to Paris" → Current: "on November 5th" = NO
-        - Previous: "where to go" → Current: "New York to Milan" = NO
+        Examples of truly NEW requests (return YES):
+        - Previous: "London to Paris" → Current: "Actually, I want New York to Tokyo instead" = YES
+        - Previous: "Lahore to Milan" → Current: "No, I meant Dubai to Bangkok" = YES
+        
+        Examples of CONTINUING (return NO):
+        - Previous: "Lahore to Milan" → Current: "round trip for 5 days" = NO
+        - Previous: "Lahore to Milan" → Current: "6th September" = NO
+        - Previous: "Lahore to Milan" → Current: "لاہور سے میلان" = NO
+        - Garbled/unclear message = NO
         
         Response: YES or NO only.
         """
@@ -1104,17 +1123,25 @@ def _is_new_flight_request(user_message: str, conversation_context: str, detecte
         result = detector_llm.invoke(messages)
         response = result.content.strip().upper()
         
+        print(f"🔍 New request detection: '{user_message[:50]}...' → {response}")
         return response == "YES"
         
     except Exception as e:
         print(f"⚠️ Error detecting new flight request: {e}")
-        return False
+        return False  # Conservative default - don't clear context on errors
+
+
+def _is_new_flight_request(user_message: str, conversation_context: str, detected_language: str) -> bool:
+    """
+    Legacy function - redirect to more conservative version
+    """
+    return _is_truly_new_flight_request(user_message, conversation_context, detected_language)
 
 
 def _has_enough_info_to_search(flight_info: dict) -> bool:
     """
     Check if we have enough information to search for flights
-    ALWAYS requires trip type to be specified before searching
+    Smart detection of trip type from context clues
     """
     # Basic required fields
     required_fields = ["origin_city", "destination_city", "departure_date"]
@@ -1124,16 +1151,35 @@ def _has_enough_info_to_search(flight_info: dict) -> bool:
         if not flight_info.get(field):
             return False
     
-    # CRITICAL: Trip type must always be specified
-    if not flight_info.get("trip_type"):
-        return False
+    # Smart trip type detection
+    trip_type = flight_info.get("trip_type")
+    duration_days = flight_info.get("duration_days")
+    return_date = flight_info.get("return_date")
     
-    # If it's round-trip, we also need return date or duration
-    if flight_info.get("trip_type") == "round-trip":
-        return flight_info.get("return_date") or flight_info.get("duration_days")
+    # If user provides duration, they clearly want round-trip
+    if duration_days and duration_days > 0:
+        print(f"🎯 Duration provided ({duration_days} days) - inferring round-trip")
+        return True
     
-    # For one-way, we have everything we need
-    return True
+    # If user provides return date, they want round-trip
+    if return_date:
+        print(f"🎯 Return date provided ({return_date}) - inferring round-trip")
+        return True
+    
+    # If explicitly specified as one-way, we have everything
+    if trip_type == "one-way":
+        print("🎯 One-way trip explicitly specified")
+        return True
+    
+    # If explicitly specified as round-trip, need return date or duration
+    if trip_type == "round-trip":
+        has_return_info = return_date or duration_days
+        print(f"🎯 Round-trip specified, has return info: {has_return_info}")
+        return has_return_info
+    
+    # If no trip type specified but we have clear indicators, ask for clarification
+    print("🎯 Missing trip type - need to ask user")
+    return False
 
 
 def _handle_flight_search(user_message: str, user_id: str, conversation_context: str, detected_language: str) -> str:
