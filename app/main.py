@@ -246,7 +246,7 @@ async def handle_text_message_async(message_text: str, user_id: str):
                 client.messages.create(
                     from_=from_num,
                     to=user_id,
-                    body=f"REF {queued_ref}\n+306945169169"
+                    body=f"REF {queued_ref}\n+92 3 1 2 8 5 6 7 4 4 2"
                 )
                 # Clear the one-time flag
                 memory_manager.add_flight_context(user_id, {"broadcast_booking_reference_once": None})
@@ -310,7 +310,7 @@ async def process_voice_message_async(user_id: str, message_text: str, media_url
                     await asyncio.get_event_loop().run_in_executor(None, lambda: client.messages.create(
                         from_=from_num,
                         to=user_id,
-                        body=f"REF {queued_ref}\n+306945169169"
+                        body=f"REF {queued_ref}\n+92 3 1 2 8 5 6 7 4 4 2"
                     ))
                     # Clear the one-time flag
                     memory_manager.add_flight_context(user_id, {"broadcast_booking_reference_once": None})

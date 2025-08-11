@@ -314,7 +314,7 @@ def generate_voice_response_via_chat_completion(text: str, language: str = 'en',
         return None
 
     try:
-        # Check if there's a booking reference to include
+        # Check if there's a booking reference to include in voice
         from .memory_service import memory_manager
         try:
             flight_ctx = memory_manager.get_flight_context(user_id)
@@ -324,10 +324,10 @@ def generate_voice_response_via_chat_completion(text: str, language: str = 'en',
             
             # If there's a booking reference queued, include it in the voice message
             if queued_ref:
-                if "booking reference" in text.lower():
-                    # Add the actual reference number to the text
-                    text = f"{text}\n\nReference number: {queued_ref}\n\nCall +92 3 1 2 8 5 6 7 4 4 2"
-                    # Clear the broadcast flag
+                if "booking reference" in text.lower() or "reference" in text.lower():
+                    # Add the actual reference number to the text for voice
+                    text = f"{text}\n\nThe reference number is: {queued_ref}\n\nPlease call: +92 3 1 2 8 5 6 7 4 4 2"
+                    # Clear the broadcast flag since we're including it in voice
                     memory_manager.add_flight_context(user_id, {"broadcast_booking_reference_once": None})
         except Exception as ref_err:
             print(f"⚠️ Could not check booking reference: {ref_err}")
@@ -759,7 +759,7 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
 def _process_message_with_chatcompletion(user_message: str, user_id: str, conversation_context: str, detected_language: str) -> str:
     """
     Process user message using ChatCompletion API for intelligent routing and natural language handling
-    This creates a ChatGPT-like conversation flow
+    This creates a ChatGPT-like conversation flow with smart flight search triggering
     """
     try:
         from langchain_openai import ChatOpenAI
@@ -784,14 +784,19 @@ def _process_message_with_chatcompletion(user_message: str, user_id: str, conver
                 detected_language, user_id
             )
         
-        # Booking intent commands
-        booking_phrases = [
-            "i want to book", "book this", "book it", "go ahead and book", "please book", 
-            "confirm booking", "reserve it", "help me book", "book for me", "book now", 
-            "proceed with booking", "go ahead with booking", "book this ticket", "book my ticket"
+        # Booking intent commands - support multiple languages
+        booking_keywords = [
+            # English
+            "book", "reserve", "confirm booking", "proceed with booking",
+            # Urdu/Hindi
+            "بک", "بکنگ", "book", "میں بک کرنا چاہتا", "بک کر دو",
+            # Arabic
+            "احجز", "حجز", "أريد الحجز"
         ]
         
-        if any(phrase in user_lower for phrase in booking_phrases):
+        has_booking_intent = any(keyword in user_lower for keyword in booking_keywords)
+        
+        if has_booking_intent:
             # Try to get booking reference
             flight_ctx = memory_manager.get_flight_context(user_id)
             quote_ref = None
@@ -802,63 +807,64 @@ def _process_message_with_chatcompletion(user_message: str, user_id: str, conver
                 # Mark for broadcasting (both text and voice will show reference)
                 memory_manager.add_flight_context(user_id, {"broadcast_booking_reference_once": quote_ref})
                 return _generate_multilingual_response(
-                    "Please quote the following booking reference to the number below:",
+                    "Please quote the following booking reference number to the number below:",
                     detected_language, user_id
                 )
             else:
                 return _generate_multilingual_response(
-                    "I can help with that. Can you please share your flight details again, or say 'search again' so I can generate your booking reference?",
+                    "I'd be happy to help you book! First, let me search for available flights. Can you confirm your travel details?",
                     detected_language, user_id
                 )
         
+        # INTELLIGENT FLIGHT SEARCH DETECTION - Check if user has provided enough info to search
+        flight_info = _extract_flight_info_from_conversation(user_message, conversation_context, detected_language)
+        
+        if _has_enough_info_to_search(flight_info):
+            print("🎯 Detected complete flight info - triggering search")
+            try:
+                # Directly search for flights
+                flight_response = _handle_flight_search(user_message, user_id, conversation_context, detected_language)
+                if flight_response and any(word in flight_response.lower() for word in ["flight", "price", "eur", "usd"]):
+                    return flight_response
+            except Exception as e:
+                print(f"⚠️ Flight search failed: {e}")
+        
         # Use ChatCompletion for intelligent conversation handling
         system_prompt = f"""
-        You are TazaTicket's intelligent travel assistant. You help users find and book flights.
+        You are TazaTicket's intelligent travel assistant. Help users find flights in a natural, ChatGPT-like conversation.
         
         CRITICAL INSTRUCTIONS:
         1. ALWAYS respond in the user's detected language: {detected_language}
-        2. Act like a natural conversation assistant (like ChatGPT/Claude)
-        3. Remember previous context and build on it naturally
-        4. For flight booking, you need: origin, destination, departure date, number of passengers, trip type (round-trip/one-way)
-        5. If any required info is missing, ask for it naturally in their language
-        6. If user provides conflicting info (like changing destination mid-conversation), acknowledge the change naturally
-        7. Keep responses conversational and friendly, not robotic
-        8. When you have all required info, confirm and proceed to search
+        2. Be smart about context - don't ask for info already mentioned
+        3. Be conversational and friendly, not robotic
+        4. Extract information naturally from conversation
+        5. Don't repeat questions unnecessarily
+        6. If user provides trip duration (like "20 days"), acknowledge it and confirm dates
+        7. When you have enough info, confidently say you're searching for flights
         
-        Required for flight search:
-        - Origin city/airport
-        - Destination city/airport  
-        - Departure date
-        - Number of passengers (default: 1)
-        - Trip type: round-trip or one-way (if round-trip, also need return date)
+        CONVERSATION ANALYSIS:
+        From the conversation history: {conversation_context}
+        User just said: {user_message}
         
-        Current conversation context:
-        {conversation_context}
+        GUIDELINES:
+        - If origin, destination, and date are clear from context, don't ask again
+        - For round-trip, confirm return date or calculate from duration mentioned
+        - Default to 1 passenger unless specified otherwise
+        - Be helpful and efficient, not repetitive
+        - Show you're listening by referencing what they've already told you
         
-        Respond naturally in {detected_language}. If the user is providing flight information, collect what's missing conversationally.
+        RESPOND NATURALLY in {detected_language}. Build on what's already been discussed.
         """
         
         # Create the conversation
         messages = [
             SystemMessage(content=system_prompt),
-            HumanMessage(content=user_message)
+            HumanMessage(content=f"User said: {user_message}")
         ]
         
         # Get intelligent response
         result = routing_llm.invoke(messages)
         response_text = result.content if isinstance(result.content, str) else str(result.content)
-        
-        # Check if we should actually search for flights
-        should_search = _should_search_flights(user_message, conversation_context, detected_language)
-        
-        if should_search:
-            # Try to extract and search for flights
-            try:
-                flight_response = _handle_flight_search(user_message, user_id, conversation_context, detected_language)
-                if flight_response and "flight" in flight_response.lower():
-                    return flight_response
-            except Exception as e:
-                print(f"⚠️ Flight search failed: {e}")
         
         return response_text
         
@@ -870,57 +876,127 @@ def _process_message_with_chatcompletion(user_message: str, user_id: str, conver
         )
 
 
-def _should_search_flights(user_message: str, conversation_context: str, detected_language: str) -> bool:
+def _extract_flight_info_from_conversation(user_message: str, conversation_context: str, detected_language: str) -> dict:
     """
-    Determine if we should actually search for flights based on the conversation
+    Extract flight information from the entire conversation context using AI
     """
     try:
         from langchain_openai import ChatOpenAI
         from langchain_core.messages import SystemMessage, HumanMessage
+        import json
         
-        analyzer_llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+        extractor_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
         
-        analysis_prompt = f"""
-        Analyze if the user has provided enough information to search for flights.
+        extraction_prompt = f"""
+        Extract flight booking information from this conversation. Return a JSON object with the fields you can identify.
         
-        Required information:
-        - Origin city/airport
-        - Destination city/airport
-        - Departure date
-        - Number of passengers (can default to 1)
-        - Trip type (round-trip or one-way)
+        Fields to extract:
+        - origin_city: departure city/airport (string)
+        - destination_city: arrival city/airport (string)  
+        - departure_date: departure date in YYYY-MM-DD format (string)
+        - return_date: return date if round-trip in YYYY-MM-DD format (string or null)
+        - passengers: number of passengers (integer, default 1)
+        - trip_type: "round-trip" or "one-way" (string)
+        - duration_days: if user mentions duration like "20 days" (integer or null)
         
-        Current conversation: {conversation_context}
+        Conversation context: {conversation_context}
         Latest message: {user_message}
         
-        Respond with just "YES" if ready to search flights, or "NO" if still collecting information.
+        Return ONLY valid JSON. If information is missing, use null.
         """
         
         messages = [
-            SystemMessage(content=analysis_prompt),
-            HumanMessage(content=user_message)
+            SystemMessage(content=extraction_prompt),
+            HumanMessage(content=f"Extract flight info from: {user_message}")
         ]
         
-        result = analyzer_llm.invoke(messages)
-        response = result.content.strip().upper()
+        result = extractor_llm.invoke(messages)
+        response_text = result.content.strip()
         
-        return response == "YES"
+        # Clean up response to extract JSON
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0]
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0]
         
-    except Exception:
-        return False
+        try:
+            flight_info = json.loads(response_text)
+            print(f"🎯 Extracted flight info: {flight_info}")
+            return flight_info
+        except json.JSONDecodeError:
+            print(f"⚠️ Could not parse flight info JSON: {response_text}")
+            return {}
+        
+    except Exception as e:
+        print(f"⚠️ Error extracting flight info: {e}")
+        return {}
+
+
+def _has_enough_info_to_search(flight_info: dict) -> bool:
+    """
+    Check if we have enough information to search for flights
+    """
+    required_fields = ["origin_city", "destination_city", "departure_date"]
+    
+    # Check if all required fields are present and not null/empty
+    for field in required_fields:
+        if not flight_info.get(field):
+            return False
+    
+    # If it's round-trip, we need return date or duration
+    if flight_info.get("trip_type") == "round-trip":
+        return flight_info.get("return_date") or flight_info.get("duration_days")
+    
+    return True
 
 
 def _handle_flight_search(user_message: str, user_id: str, conversation_context: str, detected_language: str) -> str:
     """
     Handle the actual flight search when we have enough information
+    Creates complete request with context and ensures booking reference generation
     """
     try:
-        # Use the existing flight booking agent
-        response = process_flight_request(user_message, user_id, conversation_context)
+        # Extract flight info to create complete request
+        flight_info = _extract_flight_info_from_conversation(user_message, conversation_context, detected_language)
+        
+        # Build a complete flight request message
+        origin = flight_info.get("origin_city", "")
+        destination = flight_info.get("destination_city", "")
+        departure_date = flight_info.get("departure_date", "")
+        return_date = flight_info.get("return_date")
+        passengers = flight_info.get("passengers", 1)
+        duration_days = flight_info.get("duration_days")
+        
+        # If round-trip with duration but no return date, calculate it
+        if flight_info.get("trip_type") == "round-trip" and duration_days and not return_date:
+            try:
+                from datetime import datetime, timedelta
+                dep_date = datetime.strptime(departure_date, "%Y-%m-%d")
+                ret_date = dep_date + timedelta(days=duration_days)
+                return_date = ret_date.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        
+        # Create comprehensive flight request
+        if return_date:
+            complete_request = f"Round trip flight from {origin} to {destination}, departing {departure_date}, returning {return_date}, for {passengers} passenger(s)"
+        else:
+            complete_request = f"One way flight from {origin} to {destination} on {departure_date} for {passengers} passenger(s)"
+        
+        print(f"🔍 Complete flight request: {complete_request}")
+        
+        # Use the existing flight booking agent with complete request
+        response = process_flight_request(complete_request, user_id, conversation_context)
         
         # Ensure response is in the correct language
         if response and detected_language != 'en':
             response = _translate_response_to_language(response, detected_language, user_id)
+        
+        # Check if booking reference was generated
+        from .memory_service import memory_manager
+        flight_ctx = memory_manager.get_flight_context(user_id)
+        if isinstance(flight_ctx, dict) and flight_ctx.get("last_quote_reference"):
+            print(f"✅ Booking reference generated: {flight_ctx.get('last_quote_reference')}")
         
         return response
         
