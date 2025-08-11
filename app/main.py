@@ -236,28 +236,22 @@ async def handle_text_message_async(message_text: str, user_id: str):
         body=text_response
     )
 
-    # 3) If booking intent, send separate message with reference and number
-    def _has_booking_intent(text: str) -> bool:
-        t = (text or "").lower()
-        return any(p in t for p in [
-            "i want to book", "book this", "book it", "go ahead and book", "please book", "confirm booking", "reserve it",
-            "help me book", "book for me", "book now", "proceed with booking", "go ahead with booking", "book this ticket", "book my ticket"
-        ])
-
-    if _has_booking_intent(message_text):
-        try:
-            from app.services.memory_service import memory_manager
-            ctx = memory_manager.get_flight_context(user_id)
-            quote_ref = ctx.get("last_quote_reference") if isinstance(ctx, dict) else None
-            if quote_ref:
-                # Send the booking reference as a separate concise message
+    # 3) If a booking reference was queued for broadcast, send it then clear the flag
+    try:
+        from app.services.memory_service import memory_manager
+        ctx = memory_manager.get_flight_context(user_id)
+        if isinstance(ctx, dict):
+            queued_ref = ctx.get("broadcast_booking_reference_once")
+            if queued_ref:
                 client.messages.create(
                     from_=from_num,
                     to=user_id,
-                    body=f"REF {quote_ref}\n+306945169169"
+                    body=f"REF {queued_ref}\n+306945169169"
                 )
-        except Exception as _:
-            pass
+                # Clear the one-time flag
+                memory_manager.add_flight_context(user_id, {"broadcast_booking_reference_once": None})
+    except Exception as _:
+        pass
 
 # Replace your webhook functions in app/main.py with these enhanced versions
 async def process_voice_message_async(user_id: str, message_text: str, media_url: str, media_content_type: str):
@@ -302,18 +296,12 @@ async def process_voice_message_async(user_id: str, message_text: str, media_url
             await send_text_response_direct_api(user_id, text_response)
         
         # If booking intent detected in original text, send separate booking ref message
-        def _has_booking_intent(text: str) -> bool:
-            t = (text or "").lower()
-            return any(p in t for p in [
-                "i want to book", "book this", "book it", "go ahead and book", "please book", "confirm booking", "reserve it",
-                "help me book", "book for me", "book now", "proceed with booking", "go ahead with booking", "book this ticket", "book my ticket"
-            ])
-        if _has_booking_intent(message_text):
-            try:
-                from app.services.memory_service import memory_manager
-                ctx = memory_manager.get_flight_context(user_id)
-                quote_ref = ctx.get("last_quote_reference") if isinstance(ctx, dict) else None
-                if quote_ref:
+        try:
+            from app.services.memory_service import memory_manager
+            ctx = memory_manager.get_flight_context(user_id)
+            if isinstance(ctx, dict):
+                queued_ref = ctx.get("broadcast_booking_reference_once")
+                if queued_ref:
                     from twilio.rest import Client
                     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
                     auth_token  = os.getenv("TWILIO_AUTH_TOKEN")
@@ -322,10 +310,12 @@ async def process_voice_message_async(user_id: str, message_text: str, media_url
                     await asyncio.get_event_loop().run_in_executor(None, lambda: client.messages.create(
                         from_=from_num,
                         to=user_id,
-                        body=f"REF {quote_ref}\n+306945169169"
+                        body=f"REF {queued_ref}\n+306945169169"
                     ))
-            except Exception as _:
-                pass
+                    # Clear the one-time flag
+                    memory_manager.add_flight_context(user_id, {"broadcast_booking_reference_once": None})
+        except Exception as _:
+            pass
         
         flush_print(f"\n✅ ASYNC VOICE PROCESSING COMPLETE")
         flush_print(f"{'='*80}\n")

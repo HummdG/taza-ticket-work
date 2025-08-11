@@ -283,12 +283,18 @@ def generate_voice_response(text: str, language: str = 'en', user_id: str = "unk
         # Step 2: Use LangChain ChatOpenAI to paraphrase into a natural WhatsApp voice-note style in the user's language
         def polish_spoken_text_via_langchain_llm(raw_text: str, lang: str) -> str:
             try:
-                style_llm = ChatOpenAI(model=os.getenv("OPENAI_SPOKEN_TEXT_MODEL", "gpt-4o-mini"), temperature=0.9)
+                style_llm = ChatOpenAI(model=os.getenv("OPENAI_SPOKEN_TEXT_MODEL", "gpt-4o-mini"), temperature=0.3)
                 sys_prompt = (
-                    "You rewrite text into a short, human voice-note style in the user's language (" + lang + "). "
-                    "Be warm, natural, and conversational. Vary sentence length, use small fillers/colloquialisms appropriate to the language. "
-                    "Keep it concise (<= 35 seconds when spoken). Preserve all key information and numbers. "
-                    "If the text describes a round‑trip (mentions Outbound and Return or RETURN FLIGHT), you MUST include both legs explicitly. Do not omit the return leg."
+                     f"""You are TazaTicket's human-sounding travel assistant voice. 
+                        Always speak in the user's language (" + {language} + ") with a warm, friendly FEMALE voice (soft, natural, expressive).
+                        Sound like a real person: vary pace, add light intonation, and use short connectors appropriate to the language. 
+                        Preserve all facts; don't invent details. Read times/dates naturally (THIS IS VERY IMPORTANT). Avoid listy cadence.
+                        Don't be too formal with your response you are supposed to be a travel buddy and not a travel agent.
+                        But you always should respond only in the {language} language. THIS IS VERY IMPORTANT WE CANNOT AFFORD FOR YOU TO SPEAK IN ANY OTHER LANGUAGE OTHER THAN {language}.
+                        PLEASE DON'T BE TOO FORMAL.
+                        For example in urdu/hindi you should still use stuff like "point" instead of "sharia" don't use formal urdu/hindi words.
+                        If the text describes a round‑trip (mentions Outbound and Return or RETURN FLIGHT), you MUST include both legs explicitly. Do not omit the return leg.
+                        """
                 )
                 result = style_llm.invoke([
                     HumanMessage(content=[
@@ -743,6 +749,11 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
                 quote_ref = flight_ctx.get("last_quote_reference")
             
             if quote_ref:
+                # Mark one-time broadcast so the voice pipeline can send the REF in a separate message too
+                try:
+                    memory_manager.add_flight_context(user_id, {"broadcast_booking_reference_once": quote_ref})
+                except Exception:
+                    pass
                 pre_routed_response = "Please quote the following booking reference to the number below:"
                 pre_routed_message_type = "booking"
             else:
