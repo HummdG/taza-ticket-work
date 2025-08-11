@@ -280,40 +280,9 @@ def generate_voice_response(text: str, language: str = 'en', user_id: str = "unk
         natural_speech_text = format_flight_for_speech(text, language)
         print(f"🗣️ Natural speech: '{natural_speech_text[:100]}...'")
         
-        # Step 2: Use LangChain ChatOpenAI to paraphrase into a natural WhatsApp voice-note style in the user's language
-        def polish_spoken_text_via_langchain_llm(raw_text: str, lang: str) -> str:
-            try:
-                style_llm = ChatOpenAI(model=os.getenv("OPENAI_SPOKEN_TEXT_MODEL", "gpt-4o-mini"), temperature=0.3)
-                sys_prompt = (
-                     f"""You are TazaTicket's human-sounding travel assistant voice. 
-                        Always speak in the user's language (" + {language} + ") with a warm, friendly FEMALE voice (soft, natural, expressive).
-                        Sound like a real person: vary pace, add light intonation, and use short connectors appropriate to the language. 
-                        Preserve all facts; don't invent details. Read times/dates naturally (THIS IS VERY IMPORTANT). Avoid listy cadence.
-                        Don't be too formal with your response you are supposed to be a travel buddy and not a travel agent.
-                        But you always should respond only in the {language} language. THIS IS VERY IMPORTANT WE CANNOT AFFORD FOR YOU TO SPEAK IN ANY OTHER LANGUAGE OTHER THAN {language}.
-                        PLEASE DON'T BE TOO FORMAL.
-                        For example in urdu/hindi you should still use stuff like "point" instead of "sharia" don't use formal urdu/hindi words.
-                        If the text describes a round‑trip (mentions Outbound and Return or RETURN FLIGHT), you MUST include both legs explicitly. Do not omit the return leg.
-                        """
-                )
-                result = style_llm.invoke([
-                    HumanMessage(content=[
-                        {"type": "text", "text": sys_prompt},
-                        {"type": "text", "text": raw_text},
-                    ])
-                ])
-                content = result.content if isinstance(result.content, str) else str(result.content)
-                return content.strip() or raw_text
-            except Exception as e:
-                print(f"⚠️ Spoken text polishing failed: {e}")
-                return raw_text
-
-        # Preserve both legs verbatim for round-trips to avoid LLM dropping the return leg
-        is_roundtrip_text = any(k in natural_speech_text.lower() for k in ["return flight", "return:", "round-trip", "round trip"])
-        if is_roundtrip_text:
-            final_text = natural_speech_text
-        else:
-            final_text = polish_spoken_text_via_langchain_llm(natural_speech_text, language)
+        # Step 2: The text should already be in the correct language from ChatCompletion API
+        # Just ensure it's optimized for speech
+        final_text = natural_speech_text
 
         voice_file_path = generate_voice_response_via_chat_completion(final_text, language, user_id)
         
@@ -333,6 +302,7 @@ def generate_voice_response_via_chat_completion(text: str, language: str = 'en',
     """
     Generate voice using OpenAI Chat Completions with audio output (female voice).
     The model is instructed to speak in the user's language and produce natural audio.
+    Ensures booking references are included in voice responses.
     """
     try:
         import base64
@@ -344,6 +314,24 @@ def generate_voice_response_via_chat_completion(text: str, language: str = 'en',
         return None
 
     try:
+        # Check if there's a booking reference to include
+        from .memory_service import memory_manager
+        try:
+            flight_ctx = memory_manager.get_flight_context(user_id)
+            queued_ref = None
+            if isinstance(flight_ctx, dict):
+                queued_ref = flight_ctx.get("broadcast_booking_reference_once")
+            
+            # If there's a booking reference queued, include it in the voice message
+            if queued_ref:
+                if "booking reference" in text.lower():
+                    # Add the actual reference number to the text
+                    text = f"{text}\n\nReference number: {queued_ref}\n\nCall +92 3 1 2 8 5 6 7 4 4 2"
+                    # Clear the broadcast flag
+                    memory_manager.add_flight_context(user_id, {"broadcast_booking_reference_once": None})
+        except Exception as ref_err:
+            print(f"⚠️ Could not check booking reference: {ref_err}")
+
         cleaned_text = clean_text_for_enhanced_tts(text)
         print(f"🎤 Using Chat Completions audio for language: {language}")
 
@@ -362,7 +350,7 @@ def generate_voice_response_via_chat_completion(text: str, language: str = 'en',
                     "role": "system",
                     "content": (
                         f"""You are TazaTicket's human-sounding travel assistant voice. 
-                        Always speak in the user's language (" + {language} + ") with a warm, friendly FEMALE voice (soft, natural, expressive).
+                        Always speak in the user's language ({language}) with a warm, friendly FEMALE voice (soft, natural, expressive).
                         Sound like a real person: vary pace, add light intonation, and use short connectors appropriate to the language. 
                         Preserve all facts; don't invent details. Read times/dates naturally (THIS IS VERY IMPORTANT). Avoid listy cadence.
                         Don't be too formal with your response you are supposed to be a travel buddy and not a travel agent.
@@ -370,6 +358,7 @@ def generate_voice_response_via_chat_completion(text: str, language: str = 'en',
                         PLEASE DON'T BE TOO FORMAL.
                         For example in urdu/hindi you should still use stuff like "point" instead of "sharia" don't use formal urdu/hindi words.
                         If the text describes a round‑trip (mentions Outbound and Return or RETURN FLIGHT), you MUST include both legs explicitly. Do not omit the return leg.
+                        If there's a booking reference number or phone number, read it clearly with pauses between digits.
                         """
                     ),
                 },
@@ -655,7 +644,7 @@ def transcribe_voice_message(media_url: str, media_content_type: str) -> str:
 
 def process_user_message(user_message: str, user_id: str = "unknown", media_url: Optional[str] = None, media_content_type: Optional[str] = None) -> Tuple[str, Optional[str]]:
     """
-    Enhanced process_user_message with AWS services integration
+    Enhanced process_user_message with natural conversation flow like ChatGPT/Claude
     
     Args:
         user_message: The user's message (could be empty for voice-only messages)
@@ -670,6 +659,7 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
     try:
         is_voice_message = False
         detected_language = 'en'  # Default language
+        original_user_message = user_message
         
         # Handle voice messages first
         if media_url and media_content_type and media_content_type.startswith('audio'):
@@ -686,199 +676,75 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
                 memory_manager.add_conversation(user_id, "[Voice Message]", transcribed_text, "voice_error")
                 return transcribed_text, None
             
-            # Detect language from transcribed text
-            detected_language = detect_language(transcribed_text)
-            
-            # Process transcribed text normally
+            # Use transcribed text as the actual message
             user_message = transcribed_text
-            print(f"🌐 Voice message language detected as: {detected_language}")
+            print(f"🎤 Transcribed: {user_message}")
+        
+        # ALWAYS detect language for every message (voice AND text)
+        if user_message and user_message.strip():
+            detected_language = detect_language(user_message)
+            print(f"🌐 Detected language: {detected_language} for message: '{user_message[:50]}...'")
         
         # Handle other media types (images, documents, etc.)
-        elif media_url and media_content_type:
+        if media_url and media_content_type and not media_content_type.startswith('audio'):
             media_type = media_content_type.split('/')[0]
-            if media_type == 'image':
-                response = "🖼️ I can see you sent an image! While I can't analyze images yet, feel free to describe what you'd like help with regarding your travel plans."
-            elif media_type == 'video':
-                response = "🎬 I received your video! While I can't analyze videos yet, please let me know how I can help with your flight booking needs."
-            elif media_type == 'application':  # Documents, PDFs, etc.
-                response = "📄 I received your document! While I can't read documents yet, feel free to tell me what information you need help with for your travel."
-            else:
-                response = "📎 I received your file! While I can't process files yet, please let me know how I can assist you with flight booking."
+            response = _generate_multilingual_response(
+                f"I received your {media_type}! While I can't analyze {media_type}s yet, feel free to tell me how I can help with your flight booking needs.",
+                detected_language, user_id
+            )
             
             from .memory_service import memory_manager
             memory_manager.add_conversation(user_id, f"[{media_type.title()}]", response, "media")
             return response, None
         
-        # ... [Keep all the existing message routing logic] ...
-        # Handle regular text messages (existing logic)
+        # Get conversation context for natural flow
         from .memory_service import memory_manager
-        from .conversation_router import should_handle_as_flight_booking, should_collect_flight_info, analyze_flight_request_completeness
-        from ..agents.general_conversation_agent import handle_general_conversation
+        conversation_context = memory_manager.get_conversation_context(user_id, max_recent=12)
         
-        # Booking intent quick-path: if user says they want to book, return quote ref if available
-        def _has_booking_intent(text: str) -> bool:
-            t = (text or "").lower()
-            return any(phrase in t for phrase in [
-                "i want to book", "book this", "book it", "go ahead and book", "please book", "confirm booking", "reserve it",
-                "help me book", "book for me", "book now", "proceed with booking", "go ahead with booking", "book this ticket", "book my ticket"
-            ])
+        # Process the message using ChatCompletion API for intelligent routing and language handling
+        response = _process_message_with_chatcompletion(user_message, user_id, conversation_context, detected_language)
         
-        # Reset flow quick-path
-        def _has_reset_intent(text: str) -> bool:
-            t = (text or "").lower().strip()
-            return t in {"new", "reset", "start over", "restart", "clear", "cancel"}
-        
-        pre_routed_response: Optional[str] = None
-        pre_routed_message_type: Optional[str] = None
-        
-        if _has_reset_intent(user_message):
-            # Clear both collection state and last flight context to avoid bleed
-            memory_manager.clear_flight_collection_state(user_id)
-            try:
-                memory_manager.clear_flight_context(user_id)
-            except Exception:
-                pass
-            pre_routed_response = "Alright, a fresh start! ✨ Where would you like to fly from? 🛫"
-            pre_routed_message_type = "reset"
-        
-        elif _has_booking_intent(user_message):
-            # Try to fetch last known quote reference from flight context
-            flight_ctx = memory_manager.get_flight_context(user_id)
-            quote_ref = None
-            if isinstance(flight_ctx, dict):
-                quote_ref = flight_ctx.get("last_quote_reference")
-            
-            if quote_ref:
-                # Mark one-time broadcast so the voice pipeline can send the REF in a separate message too
-                try:
-                    memory_manager.add_flight_context(user_id, {"broadcast_booking_reference_once": quote_ref})
-                except Exception:
-                    pass
-                pre_routed_response = "Please quote the following booking reference to the number below:"
-                pre_routed_message_type = "booking"
-            else:
-                pre_routed_response = "Great — I can help with that. Can you please resend your last flight details here, or say 'search again' so I can generate your booking reference?"
-                pre_routed_message_type = "booking_help"
-        
-        # If we prepared a direct response (reset/booking), skip routing and go to voice generation
-        if pre_routed_response is not None:
-            response = pre_routed_response
-            message_type = pre_routed_message_type or "general"
-        else:
-            # Get conversation context from memory (use deeper history for better continuity)
-            conversation_context = memory_manager.get_conversation_context(user_id, max_recent=12)
-            
-            # Check if user is currently collecting flight information
-            is_collecting = memory_manager.is_collecting_flight_info(user_id)
-            
-            if is_collecting:
-                print(f"🔄 Continuing flight info collection for user: {user_id}")
-                
-                # Auto-detect if the user wants a different/new flight (override current collection)
-                def _wants_new_flight(text: str, current_info: dict) -> bool:
-                    t = (text or "").lower()
-                    keywords = [
-                        "instead", "different city", "another city", "new ticket", "different ticket",
-                        "change destination", "change city", "change from", "change to", "new flight",
-                        "go to ", "i want to go to", "fly to ", "fly from ", "switch to"
-                    ]
-                    if any(k in t for k in keywords):
-                        return True
-                    try:
-                        # Extract without prior context to avoid bias
-                        from ..services.flight_info_collector import flight_collector as _fc
-                        extracted = _fc.extract_flight_info(text, "")
-                        fc = extracted.get("from_city")
-                        tc = extracted.get("to_city")
-                        if (fc and fc != current_info.get("from_city")) or (tc and tc != current_info.get("to_city")):
-                            return True
-                    except Exception:
-                        pass
-                    return False
-                
-                try:
-                    collection_state = memory_manager.get_flight_collection_state(user_id)
-                    current_info = collection_state.get("collected_info", {}) if isinstance(collection_state, dict) else {}
-                    if _wants_new_flight(user_message, current_info):
-                        print("🔁 Detected new/different flight intent mid-flow → resetting collection")
-                        memory_manager.clear_flight_collection_state(user_id)
-                        # Start a fresh collection with no previous context to avoid bleed-through
-                        response = start_flight_info_collection(user_message, user_id, "")
-                        message_type = "flight_collection"
-                    else:
-                        response = handle_flight_info_collection(user_message, user_id, conversation_context)
-                        message_type = "flight_collection"
-                except Exception:
-                    response = handle_flight_info_collection(user_message, user_id, conversation_context)
-                    message_type = "flight_collection"
-            
-            else:
-                # Analyze intent and completeness first to avoid breaking on missing info
-                has_intent, is_complete, _extracted = analyze_flight_request_completeness(user_message, conversation_context)
-                
-                # Start or continue info collection if intent is present but info is incomplete
-                if has_intent and not is_complete:
-                    print(f"📝 Starting flight info collection for user: {user_id}")
-                    response = start_flight_info_collection(user_message, user_id, conversation_context)
-                    message_type = "flight_collection"
-                
-                # Handle complete flight booking requests
-                elif has_intent and is_complete:
-                    print(f"🛫 Routing to flight booking agent for user: {user_id}")
-                    response = process_flight_request(user_message, user_id, conversation_context)
-                    message_type = "flight"
-                
-                # Default to general conversation
-                else:
-                    print(f"💬 Routing to general conversation agent for user: {user_id}")
-                    response = handle_general_conversation(user_message, user_id, conversation_context)
-                    message_type = "general"
-        
-        # Ensure we never send an empty response (Twilio 400 guard)
-        if not isinstance(response, str):
-            response = str(response or "")
-        if not response.strip():
-            response = "✈️ To get started, please tell me your departure city, destination, and date."
+        # Ensure we never send an empty response
+        if not isinstance(response, str) or not response.strip():
+            response = _generate_multilingual_response(
+                "To get started, please tell me your departure city, destination, and date.",
+                detected_language, user_id
+            )
         
         # Generate voice response if original was a voice message
         voice_file_url = None
         if is_voice_message and response:
             print(f"🎤 Generating voice response in language: {detected_language}")
             try:
-                # Use AWS services for voice generation
                 voice_file_path = generate_voice_response(response, detected_language, user_id)
-            except Exception as gen_err:
-                print(f"❌ Voice generation threw: {gen_err}")
-                voice_file_path = None
-            
-            if voice_file_path:
-                try:
-                    # Upload to accessible URL
+                if voice_file_path:
                     voice_file_url = upload_voice_file_to_accessible_url(voice_file_path, user_id)
-                    if not voice_file_url:
+                    if voice_file_url:
+                        # Clean up local temp file after upload
+                        try:
+                            os.unlink(voice_file_path)
+                            print(f"🧹 Cleaned up temporary file: {voice_file_path}")
+                        except Exception as cleanup_error:
+                            print(f"⚠️ Could not clean up temp file: {cleanup_error}")
+                    else:
                         print("⚠️ Voice upload returned no URL; falling back to text-only reply")
-                    
-                    # Clean up local temp file after upload
-                    try:
-                        os.unlink(voice_file_path)
-                        print(f"🧹 Cleaned up temporary file: {voice_file_path}")
-                    except Exception as cleanup_error:
-                        print(f"⚠️ Could not clean up temp file: {cleanup_error}")
-                except Exception as upload_err:
-                    print(f"❌ Voice upload error: {upload_err}")
-                    voice_file_url = None
-            else:
-                print("⚠️ No voice file generated; responding with text only")
+                else:
+                    print("⚠️ No voice file generated; responding with text only")
+            except Exception as gen_err:
+                print(f"❌ Voice generation error: {gen_err}")
         
         # Save the conversation to memory
-        message_identifier = f"🎤 [Voice]: {user_message}" if is_voice_message else user_message
-        memory_manager.add_conversation(user_id, message_identifier, response, message_type)
+        message_identifier = f"🎤 [Voice]: {original_user_message}" if is_voice_message else original_user_message
+        memory_manager.add_conversation(user_id, message_identifier, response, "conversation")
         
         return response, voice_file_url
         
     except Exception as e:
         print(f"❌ Error processing message: {e}")
-        error_response = "😅 I'm having trouble processing your request right now. Please try again later!"
+        error_response = _generate_multilingual_response(
+            "I'm having trouble processing your request right now. Please try again later!",
+            detected_language, user_id
+        )
         
         # Still save error conversations to memory
         try:
@@ -890,141 +756,256 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
         return error_response, None
 
 
-def start_flight_info_collection(user_message: str, user_id: str, conversation_context: str) -> str:
+def _process_message_with_chatcompletion(user_message: str, user_id: str, conversation_context: str, detected_language: str) -> str:
     """
-    Start collecting flight information from a partial request
-    
-    Args:
-        user_message: The user's message with partial flight info
-        user_id: Unique identifier for the user
-        conversation_context: Previous conversation context
-        
-    Returns:
-        str: Question to collect missing information
+    Process user message using ChatCompletion API for intelligent routing and natural language handling
+    This creates a ChatGPT-like conversation flow
     """
-    
     try:
-        # Extract available flight information
-        has_intent, is_complete, extracted_info = analyze_flight_request_completeness(user_message, conversation_context)
+        from langchain_openai import ChatOpenAI
+        from langchain_core.messages import SystemMessage, HumanMessage
+        from .memory_service import memory_manager
         
-        if not has_intent:
-            # Shouldn't happen, but fallback to general conversation
-            return handle_general_conversation(user_message, user_id, conversation_context)
+        # Initialize the smart routing LLM
+        routing_llm = ChatOpenAI(
+            model=os.getenv("OPENAI_ROUTING_MODEL", "gpt-4o-mini"), 
+            temperature=0.1
+        )
         
-        if is_complete:
-            # Before searching, collect trip type / passengers if missing
-            additional_missing = flight_collector.identify_additional_missing_info(extracted_info)
-            if additional_missing:
-                collection_state = {
-                    "collecting": True,
-                    "collected_info": extracted_info,
-                    "started_with": user_message
-                }
-                memory_manager.set_flight_collection_state(user_id, collection_state)
-                return flight_collector.generate_question_for_additional_info(additional_missing, extracted_info)
-            # Complete information, route to flight search
-            return process_flight_request(user_message, user_id, conversation_context)
+        # Check for special commands first
+        user_lower = user_message.lower().strip()
         
-        # Save the collection state
-        collection_state = {
-            "collecting": True,
-            "collected_info": extracted_info,
-            "started_with": user_message
-        }
-        memory_manager.set_flight_collection_state(user_id, collection_state)
+        # Reset/Clear commands
+        if user_lower in ["new", "reset", "start over", "restart", "clear", "cancel"]:
+            memory_manager.clear_flight_collection_state(user_id)
+            memory_manager.clear_flight_context(user_id)
+            return _generate_multilingual_response(
+                "Alright, a fresh start! Where would you like to fly from?",
+                detected_language, user_id
+            )
         
-        # Generate question for missing required information
-        missing_fields = flight_collector.identify_missing_info(extracted_info)
-        question = flight_collector.generate_question_for_missing_info(missing_fields, extracted_info)
+        # Booking intent commands
+        booking_phrases = [
+            "i want to book", "book this", "book it", "go ahead and book", "please book", 
+            "confirm booking", "reserve it", "help me book", "book for me", "book now", 
+            "proceed with booking", "go ahead with booking", "book this ticket", "book my ticket"
+        ]
         
-        return question
+        if any(phrase in user_lower for phrase in booking_phrases):
+            # Try to get booking reference
+            flight_ctx = memory_manager.get_flight_context(user_id)
+            quote_ref = None
+            if isinstance(flight_ctx, dict):
+                quote_ref = flight_ctx.get("last_quote_reference")
+            
+            if quote_ref:
+                # Mark for broadcasting (both text and voice will show reference)
+                memory_manager.add_flight_context(user_id, {"broadcast_booking_reference_once": quote_ref})
+                return _generate_multilingual_response(
+                    "Please quote the following booking reference to the number below:",
+                    detected_language, user_id
+                )
+            else:
+                return _generate_multilingual_response(
+                    "I can help with that. Can you please share your flight details again, or say 'search again' so I can generate your booking reference?",
+                    detected_language, user_id
+                )
+        
+        # Use ChatCompletion for intelligent conversation handling
+        system_prompt = f"""
+        You are TazaTicket's intelligent travel assistant. You help users find and book flights.
+        
+        CRITICAL INSTRUCTIONS:
+        1. ALWAYS respond in the user's detected language: {detected_language}
+        2. Act like a natural conversation assistant (like ChatGPT/Claude)
+        3. Remember previous context and build on it naturally
+        4. For flight booking, you need: origin, destination, departure date, number of passengers, trip type (round-trip/one-way)
+        5. If any required info is missing, ask for it naturally in their language
+        6. If user provides conflicting info (like changing destination mid-conversation), acknowledge the change naturally
+        7. Keep responses conversational and friendly, not robotic
+        8. When you have all required info, confirm and proceed to search
+        
+        Required for flight search:
+        - Origin city/airport
+        - Destination city/airport  
+        - Departure date
+        - Number of passengers (default: 1)
+        - Trip type: round-trip or one-way (if round-trip, also need return date)
+        
+        Current conversation context:
+        {conversation_context}
+        
+        Respond naturally in {detected_language}. If the user is providing flight information, collect what's missing conversationally.
+        """
+        
+        # Create the conversation
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_message)
+        ]
+        
+        # Get intelligent response
+        result = routing_llm.invoke(messages)
+        response_text = result.content if isinstance(result.content, str) else str(result.content)
+        
+        # Check if we should actually search for flights
+        should_search = _should_search_flights(user_message, conversation_context, detected_language)
+        
+        if should_search:
+            # Try to extract and search for flights
+            try:
+                flight_response = _handle_flight_search(user_message, user_id, conversation_context, detected_language)
+                if flight_response and "flight" in flight_response.lower():
+                    return flight_response
+            except Exception as e:
+                print(f"⚠️ Flight search failed: {e}")
+        
+        return response_text
         
     except Exception as e:
-        print(f"❌ Error starting flight info collection: {e}")
-        return "✈️ I'd be happy to help you find a flight! 😊 Could you tell me where you'd like to fly from, where you want to go, and when you'd like to travel?"
+        print(f"❌ Error in ChatCompletion processing: {e}")
+        return _generate_multilingual_response(
+            "I'd be happy to help you find a flight! Could you tell me where you'd like to fly from, where you want to go, and when you'd like to travel?",
+            detected_language, user_id
+        )
 
 
-def handle_flight_info_collection(user_message: str, user_id: str, conversation_context: str) -> str:
+def _should_search_flights(user_message: str, conversation_context: str, detected_language: str) -> bool:
     """
-    Continue collecting flight information from user responses
-    
-    Args:
-        user_message: The user's response with additional flight info
-        user_id: Unique identifier for the user
-        conversation_context: Previous conversation context
-        
-    Returns:
-        str: Next question or flight search results
+    Determine if we should actually search for flights based on the conversation
     """
-    
     try:
-        # Get current collection state
-        collection_state = memory_manager.get_flight_collection_state(user_id)
-        current_info = collection_state.get("collected_info", {})
+        from langchain_openai import ChatOpenAI
+        from langchain_core.messages import SystemMessage, HumanMessage
         
-        # Extract new information from user message
-        new_info = flight_collector.extract_flight_info(user_message, conversation_context)
+        analyzer_llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
         
-        # Merge with existing information
-        merged_info = flight_collector.merge_flight_info(current_info, new_info)
+        analysis_prompt = f"""
+        Analyze if the user has provided enough information to search for flights.
         
-        # If user gave a duration like '20 days' and we have a departure_date, compute return_date
-        try:
-            from .flight_info_collector import parse_trip_duration_days
-            if not merged_info.get("return_date") and merged_info.get("departure_date"):
-                days = parse_trip_duration_days(user_message)
-                if days and days > 0:
-                    dep = merged_info.get("departure_date")
-                    dep_dt = datetime.strptime(dep, "%Y-%m-%d")
-                    ret_dt = dep_dt + timedelta(days=days)
-                    merged_info["return_date"] = ret_dt.strftime("%Y-%m-%d")
-                    merged_info["trip_type"] = merged_info.get("trip_type") or "round-trip"
-                    merged_info["trip_type_source"] = merged_info.get("trip_type_source") or "explicit"
-        except Exception:
-            pass
+        Required information:
+        - Origin city/airport
+        - Destination city/airport
+        - Departure date
+        - Number of passengers (can default to 1)
+        - Trip type (round-trip or one-way)
         
-        # First ensure required fields
-        missing_required = flight_collector.identify_missing_info(merged_info)
-        if missing_required:
-            collection_state["collected_info"] = merged_info
-            memory_manager.set_flight_collection_state(user_id, collection_state)
-            return flight_collector.generate_question_for_missing_info(missing_required, merged_info)
+        Current conversation: {conversation_context}
+        Latest message: {user_message}
         
-        # Then ensure additional (trip type/return/passengers)
-        missing_additional = flight_collector.identify_additional_missing_info(merged_info)
-        if missing_additional:
-            collection_state["collected_info"] = merged_info
-            memory_manager.set_flight_collection_state(user_id, collection_state)
-            return flight_collector.generate_question_for_additional_info(missing_additional, merged_info)
+        Respond with just "YES" if ready to search flights, or "NO" if still collecting information.
+        """
         
-        # All info complete; clear state and proceed to search
-        memory_manager.clear_flight_collection_state(user_id)
+        messages = [
+            SystemMessage(content=analysis_prompt),
+            HumanMessage(content=user_message)
+        ]
         
-        # Create a summary and proceed to flight search
-        summary = flight_collector.format_collected_info_summary(merged_info)
+        result = analyzer_llm.invoke(messages)
+        response = result.content.strip().upper()
         
-        # Construct a complete flight request message
-        from_city = merged_info.get("from_city", "")
-        to_city = merged_info.get("to_city", "")
-        departure_date = merged_info.get("departure_date", "")
-        return_date = merged_info.get("return_date")
-        passengers = merged_info.get("passengers", 1)
+        return response == "YES"
         
-        if return_date:
-            complete_request = f"Round trip from {from_city} to {to_city}, depart {departure_date}, return {return_date}, {passengers} pax"
-        else:
-            complete_request = f"Find flights from {from_city} to {to_city} on {departure_date} for {passengers} passenger(s)"
+    except Exception:
+        return False
+
+
+def _handle_flight_search(user_message: str, user_id: str, conversation_context: str, detected_language: str) -> str:
+    """
+    Handle the actual flight search when we have enough information
+    """
+    try:
+        # Use the existing flight booking agent
+        response = process_flight_request(user_message, user_id, conversation_context)
         
-        # Process as complete flight request
-        flight_response = process_flight_request(complete_request, user_id, conversation_context)
+        # Ensure response is in the correct language
+        if response and detected_language != 'en':
+            response = _translate_response_to_language(response, detected_language, user_id)
         
-        return f"{summary}\n\n{flight_response}"
+        return response
         
     except Exception as e:
-        print(f"❌ Error handling flight info collection: {e}")
-        # Clear collection state on error
-        memory_manager.clear_flight_collection_state(user_id)
-        return "😅 I had trouble processing that information. Let's start over - ✈️ could you tell me where you'd like to fly from, where you want to go, and when?"
+        print(f"❌ Error in flight search: {e}")
+        return _generate_multilingual_response(
+            "I'm having trouble searching for flights right now. Please try again later.",
+            detected_language, user_id
+        )
+
+
+def _generate_multilingual_response(english_text: str, target_language: str, user_id: str) -> str:
+    """
+    Generate a response in the user's language using ChatCompletion
+    """
+    if target_language == 'en':
+        return english_text
+    
+    try:
+        from langchain_openai import ChatOpenAI
+        from langchain_core.messages import SystemMessage, HumanMessage
+        
+        translator_llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.1)
+        
+        translation_prompt = f"""
+        Translate the following English text to {target_language}. 
+        Keep the tone friendly and natural for a travel assistant.
+        Preserve any emojis and maintain the conversational style.
+        
+        English text: {english_text}
+        """
+        
+        messages = [
+            SystemMessage(content=translation_prompt),
+            HumanMessage(content=english_text)
+        ]
+        
+        result = translator_llm.invoke(messages)
+        translated_text = result.content if isinstance(result.content, str) else str(result.content)
+        
+        return translated_text.strip()
+        
+    except Exception as e:
+        print(f"⚠️ Translation failed: {e}")
+        return english_text  # Fallback to English
+
+
+def _translate_response_to_language(response_text: str, target_language: str, user_id: str) -> str:
+    """
+    Translate a flight search response to the target language
+    """
+    if target_language == 'en':
+        return response_text
+    
+    try:
+        from langchain_openai import ChatOpenAI
+        from langchain_core.messages import SystemMessage, HumanMessage
+        
+        translator_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
+        
+        translation_prompt = f"""
+        Translate this flight search response to {target_language}.
+        Preserve all flight details, dates, times, prices, and booking references exactly.
+        Keep the tone friendly and natural for a travel assistant.
+        Maintain any emojis and formatting.
+        
+        Original response: {response_text}
+        """
+        
+        messages = [
+            SystemMessage(content=translation_prompt),
+            HumanMessage(content=response_text)
+        ]
+        
+        result = translator_llm.invoke(messages)
+        translated_text = result.content if isinstance(result.content, str) else str(result.content)
+        
+        return translated_text.strip()
+        
+    except Exception as e:
+        print(f"⚠️ Response translation failed: {e}")
+        return response_text  # Fallback to original
+
+
+# Legacy functions removed - now using ChatCompletion API for natural conversation flow
 
 
 def process_flight_request(user_message: str, user_id: str = "unknown", conversation_context: str = "") -> str:
