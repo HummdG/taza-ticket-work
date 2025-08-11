@@ -40,17 +40,28 @@ def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
     if state.get("conversation_context"):
         context_section = f"\nPrevious conversation context:\n{state['conversation_context']}\n"
     
+    current_year = datetime.now().year
+    current_month = datetime.now().month
+    
     parsing_prompt = f"""
-    Today's date is {today}. Extract flight booking details from this user message: "{state['user_message']}"
+    Today's date is {today} (Current year: {current_year}). Extract flight booking details from this user message: "{state['user_message']}"
     {context_section}
     
     Pay special attention to round-trip requests and duration-based bookings.
+    
+    CRITICAL DATE PARSING RULE:
+    - ALWAYS use the current year ({current_year}) for dates unless explicitly stated otherwise
+    - If a month has already passed this year, use NEXT year ({current_year + 1})
+    - Examples: "4 نومبر" = November 4, {current_year} (current year is 2025)
+    - "چار نومبر" = November 4, {current_year}  
+    - Never default to past years like 2023 or 2024
+    - Remember: We are in {current_year}, so November {current_year} is the correct future date
     
     Return ONLY a JSON object with these fields:
     {{
         "from_city": "3-letter airport code or null",
         "to_city": "3-letter airport code or null", 
-        "departure_date": "YYYY-MM-DD format or null (for specific date)",
+        "departure_date": "YYYY-MM-DD format or null (ALWAYS use {current_year} or {current_year + 1})",
         "return_date": "YYYY-MM-DD format or null (for return flights)",
         "passengers": "number of passengers (default 1)",
         "passenger_age": "age of passenger (default 25)",
@@ -68,7 +79,7 @@ def parse_travel_request(state: FlightBookingState) -> FlightBookingState:
     - "going for a week" = departure + 7 days for return
     - Always calculate return_date when trip_type is "round-trip" and duration_days is provided
     - Today is {today}, tomorrow is {tomorrow}
-    - Use standard 3-letter IATA codes (KHI=Karachi, DXB=Dubai)
+    - Use standard 3-letter IATA codes (KHI=Karachi, DXB=Dubai, LHE=Lahore, MXP=Milan)
     
     Duration calculation examples:
     - "leaving tomorrow for 5 days" → departure: {tomorrow}, return: {(datetime.now() + timedelta(days=6)).strftime("%Y-%m-%d")}

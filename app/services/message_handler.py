@@ -997,6 +997,7 @@ def _extract_flight_info_from_conversation(user_message: str, conversation_conte
     try:
         from langchain_openai import ChatOpenAI
         from langchain_core.messages import SystemMessage, HumanMessage
+        from datetime import datetime
         import json
         
         extractor_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
@@ -1015,14 +1016,24 @@ def _extract_flight_info_from_conversation(user_message: str, conversation_conte
         3. Be intelligent about context - if user just clarified duration but cities are in previous messages, merge intelligently
         4. If user is frustrated/repeating, they likely provided complete info already
         
+        TODAY'S DATE: {datetime.now().strftime("%Y-%m-%d")}
+        CURRENT YEAR: {datetime.now().year}
+        
         Extract and merge intelligently:
         - origin_city: departure city/airport (string) - check both current message and context
         - destination_city: arrival city/airport (string) - check both current message and context
-        - departure_date: departure date in YYYY-MM-DD format (string)
+        - departure_date: departure date in YYYY-MM-DD format (string) - ALWAYS use current year {datetime.now().year} or next year if month has passed
         - return_date: return date if round-trip in YYYY-MM-DD format (string or null)
         - passengers: number of passengers (integer, default 1)
         - trip_type: "round-trip" or "one-way" (string) - SMART DETECTION BELOW
         - duration_days: if user mentions duration like "5 days" (integer or null)
+        
+        DATE PARSING RULES:
+        - "4 نومبر" or "چار نومبر" = November 4th of CURRENT YEAR ({datetime.now().year})
+        - If the month has already passed this year, use NEXT YEAR ({datetime.now().year + 1})  
+        - Never use past years like 2023 or 2024 unless explicitly mentioned
+        - Today is {datetime.now().strftime("%B %d, %Y")}
+        - IMPORTANT: Current year is {datetime.now().year}, so November 2025 is the correct future date
         
         SMART TRIP TYPE DETECTION:
         - If duration mentioned ("5 days", "پانچ دن بعد", etc.) → ALWAYS "round-trip"
