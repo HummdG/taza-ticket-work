@@ -642,6 +642,45 @@ def transcribe_voice_message(media_url: str, media_content_type: str) -> str:
         return "🎤 I had trouble understanding your voice message. Could you please try again or type your message instead?"
 
 
+def _is_transcription_garbled(text: str) -> bool:
+    """
+    Detect if a transcription seems garbled or nonsensical
+    """
+    try:
+        text = text.strip().lower()
+        
+        # Very short text is likely unclear
+        if len(text) < 5:
+            return True
+            
+        # Check for repeated nonsensical patterns
+        words = text.split()
+        if len(words) < 2:
+            return True
+            
+        # Check for very long "words" that are likely transcription errors
+        for word in words:
+            if len(word) > 15 and not any(char.isspace() for char in word):
+                return True
+        
+        # Check for patterns that indicate transcription errors
+        garbled_patterns = [
+            # Tamil/Telugu gibberish patterns often seen in bad transcriptions
+            "ஆமேல்", "ஒருசு", "ஜானாச்சாரம்", "கொட்டுக்கிடப்பட்டான்",
+            # Other common transcription error patterns
+            "asdf", "qwerty", "zxcv"
+        ]
+        
+        for pattern in garbled_patterns:
+            if pattern in text:
+                return True
+                
+        return False
+        
+    except Exception:
+        return False
+
+
 def process_user_message(user_message: str, user_id: str = "unknown", media_url: Optional[str] = None, media_content_type: Optional[str] = None) -> Tuple[str, Optional[str]]:
     """
     Enhanced process_user_message with natural conversation flow like ChatGPT/Claude
@@ -679,6 +718,17 @@ def process_user_message(user_message: str, user_id: str = "unknown", media_url:
             # Use transcribed text as the actual message
             user_message = transcribed_text
             print(f"🎤 Transcribed: {user_message}")
+            
+            # Check if transcription seems garbled/nonsensical
+            if _is_transcription_garbled(transcribed_text):
+                print("⚠️ Detected garbled transcription - asking user to repeat")
+                error_message = _generate_multilingual_response(
+                    "I'm sorry, I couldn't understand your voice message clearly. Could you please speak more clearly or try typing your message?",
+                    detected_language, user_id
+                )
+                from .memory_service import memory_manager
+                memory_manager.add_conversation(user_id, "[Unclear Voice Message]", error_message, "voice_unclear")
+                return error_message, None
         
         # ALWAYS detect language for every message (voice AND text)
         if user_message and user_message.strip():
@@ -845,10 +895,17 @@ def _process_message_with_chatcompletion(user_message: str, user_id: str, conver
         3. Be conversational and don't repeat questions
         4. ALWAYS ask about trip type (round-trip or one-way) before searching
         5. Don't mix up different flight requests
+        6. If user seems frustrated or mentions language issues, acknowledge and help
         
         CONVERSATION ANALYSIS:
         Previous conversation: {conversation_context}
         Current message: {user_message}
+        
+        SPECIAL HANDLING:
+        - If user mentions "لاہور" (Lahore) or similar, extract it as origin city
+        - If user seems frustrated about language detection, acknowledge and continue in their language
+        - If user says they're speaking one language but system detected another, trust the user
+        - Don't keep asking for information the user already provided
         
         REQUIRED INFO BEFORE SEARCHING:
         - Origin city/airport ✈️
@@ -863,6 +920,7 @@ def _process_message_with_chatcompletion(user_message: str, user_id: str, conver
         - ALWAYS confirm trip type before searching: "Is this a round-trip or one-way flight?"
         - If round-trip, ask for return date or duration
         - Only search when you have ALL required information
+        - Be helpful and understanding, not repetitive
         
         RESPOND NATURALLY in {detected_language}.
         """
