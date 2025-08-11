@@ -857,6 +857,20 @@ class FlightSpeechFormatter:
         spoken = " ".join([p.strip() for p in parts if p.strip()])
         return re.sub(r'\s+', ' ', spoken).strip()
 
+    def _clean_for_basic_speech(self, text: str) -> str:
+        """Minimal fallback cleaner when we can't extract structured details.
+        Removes emoji/markup and condenses whitespace so TTS sounds natural.
+        """
+        if not text:
+            return ""
+        # Remove most emojis and pictographs
+        cleaned = re.sub(r"[\U0001F300-\U0001FAFF\U00002700-\U000027BF\u2600-\u26FF]", "", text)
+        # Remove common icons used in our messages
+        cleaned = re.sub(r"[✈️🛫🛬💰🔄🧳⏱️📅🏢🎉✅❌⚠️]", "", cleaned)
+        # Normalize punctuation spacing
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
     def _clean_time_info(self, time_info: str) -> str:
         cleaned = re.sub(r'[🛫🛬]', '', time_info)
         cleaned = cleaned.replace('Terminal M', 'from Terminal M')
