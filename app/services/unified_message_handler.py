@@ -18,8 +18,8 @@ from ..agents.general_conversation_agent import handle_general_conversation
 from ..services.conversation_router import should_handle_as_flight_booking
 from .message_handler import (
     SecureTazaTicketS3Handler, 
-    transcribe_audio_whisper, 
-    generate_tts_response,
+    transcribe_voice_message, 
+    generate_voice_response,
     create_twiml_response
 )
 
@@ -62,7 +62,7 @@ async def process_unified_message(
         # Handle voice input
         if media_url and media_content_type and "audio" in media_content_type:
             print(f"🎤 Processing voice message for user {user_id}")
-            transcribed_text = transcribe_audio_whisper(media_url)
+            transcribed_text = transcribe_voice_message(media_url, media_content_type)
             if not transcribed_text:
                 return "I couldn't understand the audio. Could you try again?", None
             user_message = transcribed_text
@@ -79,6 +79,10 @@ async def process_unified_message(
         
         print(f"🧠 Current state summary: {memory.get_known_info_summary()}")
         
+        # Initialize variables
+        detected_language = "en"
+        text_response = ""
+        
         # Decide which agent to use
         if should_use_unified_agent(user_message, user_id):
             print(f"🤖 Using unified conversation agent")
@@ -89,6 +93,9 @@ async def process_unified_message(
                 current_state=current_state,
                 user_mode=response_mode
             )
+            
+            # Store detected language
+            detected_language = response.language.split('-')[0] if response.language else "en"
             
             # Update conversation state
             memory.update_conversation_state(response.state_update)
@@ -138,7 +145,7 @@ async def process_unified_message(
         audio_url = None
         if response_mode == "speech":
             print(f"🔊 Generating voice response")
-            audio_url = generate_tts_response(text_response, user_id)
+            audio_url = generate_voice_response(text_response, detected_language, user_id)
         
         # Store the exchange
         memory.add_message(user_message, text_response, "unified")

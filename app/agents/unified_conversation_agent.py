@@ -7,7 +7,14 @@ import json
 import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
-from langdetect import detect, DetectorFactory
+try:
+    from langdetect import detect, DetectorFactory
+    # Set deterministic language detection
+    DetectorFactory.seed = 0
+    LANGDETECT_AVAILABLE = True
+except ImportError:
+    print("⚠️ langdetect not available, falling back to English")
+    LANGDETECT_AVAILABLE = False
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
@@ -19,8 +26,7 @@ from ..payloads.flight_search import (
     build_multi_city_payload
 )
 
-# Set deterministic language detection
-DetectorFactory.seed = 0
+
 
 # Initialize LLM
 llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0)
@@ -101,6 +107,9 @@ AIRPORT_CODES = {
 
 def detect_language(text: str) -> str:
     """Detect language from user text and return BCP47 code"""
+    if not LANGDETECT_AVAILABLE:
+        return 'en-US'  # Fallback when langdetect is not available
+        
     try:
         detected = detect(text)
         # Map to BCP47 codes
