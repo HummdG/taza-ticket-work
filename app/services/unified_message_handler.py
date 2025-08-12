@@ -20,6 +20,7 @@ from .message_handler import (
     SecureTazaTicketS3Handler, 
     transcribe_voice_message, 
     generate_voice_response,
+    upload_voice_file_to_accessible_url,
     create_twiml_response
 )
 
@@ -145,7 +146,27 @@ async def process_unified_message(
         audio_url = None
         if response_mode == "speech":
             print(f"🔊 Generating voice response")
-            audio_url = generate_voice_response(text_response, detected_language, user_id)
+            try:
+                # Generate voice file locally
+                voice_file_path = generate_voice_response(text_response, detected_language, user_id)
+                if voice_file_path:
+                    # Upload to S3 and get public URL
+                    audio_url = upload_voice_file_to_accessible_url(voice_file_path, user_id)
+                    if audio_url:
+                        # Clean up local temp file after upload
+                        try:
+                            import os
+                            os.unlink(voice_file_path)
+                            print(f"🧹 Cleaned up temporary file: {voice_file_path}")
+                        except Exception as cleanup_error:
+                            print(f"⚠️ Could not clean up temp file: {cleanup_error}")
+                    else:
+                        print("⚠️ Failed to upload voice file to S3")
+                else:
+                    print("⚠️ Failed to generate voice file")
+            except Exception as voice_error:
+                print(f"❌ Voice generation error: {voice_error}")
+                audio_url = None
         
         # Store the exchange
         memory.add_message(user_message, text_response, "unified")
