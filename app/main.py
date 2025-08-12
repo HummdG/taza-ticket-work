@@ -16,6 +16,7 @@ from typing import Optional
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
 from dotenv import load_dotenv
+from datetime import datetime
 
 # Twilio client import - ADD THIS
 try:
@@ -215,26 +216,51 @@ async def webhook_handler_fast_response(request: Request):
 
 async def handle_text_message_async(message_text: str, user_id: str):
     """Background task: process text and send back via Twilio REST API."""
-    from app.services.message_handler import process_user_message
+    try:
+        # Use enhanced unified message handler
+        from app.services.unified_message_handler import process_user_message_enhanced
+        
+        # 1) generate the reply using enhanced processing
+        text_response, audio_url = await process_user_message_enhanced(message_text, user_id)
+        if not isinstance(text_response, str):
+            text_response = str(text_response or "")
+        if not text_response.strip():
+            text_response = "✈️ To get started, please tell me your departure city, destination, and date."
 
-    # 1) generate the reply
-    text_response, _ = process_user_message(message_text, user_id)
-    if not isinstance(text_response, str):
-        text_response = str(text_response or "")
-    if not text_response.strip():
-        text_response = "✈️ To get started, please tell me your departure city, destination, and date."
+        # 2) send via Twilio API
+        account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+        auth_token  = os.getenv("TWILIO_AUTH_TOKEN")
+        client      = Client(account_sid, auth_token)
+        from_num    = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
 
-    # 2) send via Twilio API
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-    auth_token  = os.getenv("TWILIO_AUTH_TOKEN")
-    client      = Client(account_sid, auth_token)
-    from_num    = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
+        # Send text response (audio_url will be None for text messages)
+        client.messages.create(
+            from_=from_num,
+            to=user_id,
+            body=text_response
+        )
+        
+    except Exception as e:
+        print(f"❌ Error in enhanced text processing: {e}")
+        # Fallback to original handler
+        from app.services.message_handler import process_user_message
+        
+        text_response, _ = process_user_message(message_text, user_id)
+        if not isinstance(text_response, str):
+            text_response = str(text_response or "")
+        if not text_response.strip():
+            text_response = "✈️ To get started, please tell me your departure city, destination, and date."
 
-    client.messages.create(
-        from_=from_num,
-        to=user_id,
-        body=text_response
-    )
+        account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+        auth_token  = os.getenv("TWILIO_AUTH_TOKEN")
+        client      = Client(account_sid, auth_token)
+        from_num    = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
+
+        client.messages.create(
+            from_=from_num,
+            to=user_id,
+            body=text_response
+        )
 
     # 3) If a booking reference was queued for broadcast, send it then clear the flag
     try:
@@ -273,14 +299,14 @@ async def process_voice_message_async(user_id: str, message_text: str, media_url
     await asyncio.sleep(0.1)
     
     try:
-        # Import the detailed processing function
-        from app.services.message_handler import process_user_message
+        # Import the enhanced processing function
+        from app.services.unified_message_handler import process_user_message_enhanced
         
-        flush_print(f"🎤 Starting detailed voice message processing...")
+        flush_print(f"🎤 Starting enhanced voice message processing...")
         flush_print(f"📱 Processing WhatsApp voice message from {user_id}")
         
-        # Process the message
-        text_response, voice_file_url = process_user_message(
+        # Process the message with enhanced handler
+        text_response, voice_file_url = await process_user_message_enhanced(
             message_text, 
             user_id, 
             media_url=media_url, 
@@ -573,15 +599,80 @@ async def send_voice_test():
 
 @app.post("/test")
 async def test_endpoint(message: TestMessage):
-    """Test endpoint for manual testing"""
-    user_id = message.user_id or "test_user"
-    response = process_user_message(
-        message.message, 
-        user_id,
-        media_url=None,  # Could be extended to test media
-        media_content_type=None
-    )
-    return {"response": response, "user_id": user_id}
+    """Test flight search functionality with enhanced conversation system"""
+    try:
+        print(f"🧪 Test request: {message.message} from {message.user_id}")
+        
+        # Use enhanced message handler
+        from app.services.unified_message_handler import process_user_message_enhanced
+        
+        text_response, audio_url = await process_user_message_enhanced(
+            message.message, 
+            message.user_id or "test_user"
+        )
+        
+        return {
+            "status": "success",
+            "user_message": message.message,
+            "bot_response": text_response,
+            "audio_url": audio_url,
+            "system": "unified_conversation_agent",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        print(f"❌ Test error: {e}")
+        return {
+            "status": "error", 
+            "error": str(e),
+            "message": "Test failed - check logs for details"
+        }
+
+
+@app.post("/test-unified")
+async def test_unified_conversation(message: TestMessage):
+    """Test the unified conversation system specifically"""
+    try:
+        from app.services.memory_service import memory_manager
+        from app.agents.unified_conversation_agent import process_conversation_turn
+        
+        # Get current conversation state
+        memory = memory_manager.get_memory(message.user_id or "test_user")
+        current_state = memory.get_conversation_state()
+        
+        # Process with unified agent
+        response = process_conversation_turn(
+            user_message=message.message,
+            current_state=current_state,
+            user_mode="text"
+        )
+        
+        # Update memory
+        memory.update_conversation_state(response.state_update)
+        
+        return {
+            "status": "success",
+            "conversation_response": {
+                "action": response.action,
+                "language": response.language,
+                "response_mode": response.response_mode,
+                "utterance": response.utterance,
+                "missing_slots": response.missing_slots,
+                "has_search_payload": bool(response.search_payload),
+                "notes": response.notes
+            },
+            "state_update": response.state_update,
+            "memory_summary": memory.get_known_info_summary(),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        print(f"❌ Unified test error: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "message": "Unified conversation test failed"
+        }
 
 
 @app.post("/test-webhook")

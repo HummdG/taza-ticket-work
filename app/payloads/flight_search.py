@@ -1,5 +1,6 @@
 """
 Flight search payload construction for Travelport API
+Enhanced with roundtrip and multi-city builders for unified conversation system
 """
 
 from typing import Dict, List, Optional
@@ -147,3 +148,70 @@ def build_multi_city_payload(
     }
     
     return payload 
+
+def build_roundtrip_flight_payload(
+    from_city: str,
+    to_city: str,
+    departure_date: str,
+    return_date: str,
+    passengers: int = 1,
+    passenger_age: int = 25,
+    preferred_carriers: Optional[List[str]] = None
+) -> Dict:
+    """
+    Build roundtrip flight search payload for Travelport API
+    
+    Args:
+        from_city: Origin airport code (3-letter IATA)
+        to_city: Destination airport code (3-letter IATA) 
+        departure_date: Departure date in YYYY-MM-DD format
+        return_date: Return date in YYYY-MM-DD format
+        passengers: Number of passengers (default: 1)
+        passenger_age: Age of passenger for ADT type (default: 25)
+        preferred_carriers: List of preferred airline codes (optional)
+        
+    Returns:
+        Dict: Complete API payload for roundtrip flight search
+    """
+    return build_flight_search_payload(
+        from_city=from_city,
+        to_city=to_city,
+        departure_date=departure_date,
+        return_date=return_date,
+        passengers=passengers,
+        passenger_age=passenger_age,
+        preferred_carriers=preferred_carriers
+    )
+
+
+def build_oneway_flight_payload(
+    from_city: str,
+    to_city: str,
+    departure_date: str,
+    passengers: int = 1,
+    passenger_age: int = 25,
+    preferred_carriers: Optional[List[str]] = None
+) -> Dict:
+    """
+    Build one-way flight search payload for Travelport API
+    
+    Args:
+        from_city: Origin airport code (3-letter IATA)
+        to_city: Destination airport code (3-letter IATA) 
+        departure_date: Departure date in YYYY-MM-DD format
+        passengers: Number of passengers (default: 1)
+        passenger_age: Age of passenger for ADT type (default: 25)
+        preferred_carriers: List of preferred airline codes (optional)
+        
+    Returns:
+        Dict: Complete API payload for one-way flight search
+    """
+    return build_flight_search_payload(
+        from_city=from_city,
+        to_city=to_city,
+        departure_date=departure_date,
+        return_date=None,
+        passengers=passengers,
+        passenger_age=passenger_age,
+        preferred_carriers=preferred_carriers
+    )

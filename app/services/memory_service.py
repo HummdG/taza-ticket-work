@@ -2,6 +2,7 @@
 Production-ready AWS DynamoDB memory management service for TazaTicket
 Ultra-cost-effective alternative to Redis - typically 10x cheaper
 Handles unlimited concurrent users with auto-scaling
+Enhanced with unified conversation state management
 """
 
 import os
@@ -339,6 +340,219 @@ class DynamoDBConversationMemory:
                 
         except Exception as e:
             print(f"⚠️ Error cleaning up old messages: {e}")
+
+    def set_conversation_state(self, state: Dict):
+        """Set the unified conversation state"""
+        try:
+            timestamp = datetime.now()
+            
+            # Clean and serialize state data
+            def _json_safe(value):
+                if isinstance(value, Decimal):
+                    return int(value) if value % 1 == 0 else float(value)
+                if isinstance(value, dict):
+                    return {k: _json_safe(v) for k, v in value.items()}
+                if isinstance(value, list):
+                    return [_json_safe(v) for v in value]
+                if isinstance(value, tuple):
+                    return tuple(_json_safe(v) for v in value)
+                return value
+
+            safe_state = _json_safe(state)
+            state_json = json.dumps(safe_state)
+            
+            # Limit state size
+            if len(state_json) > 15000:
+                print("⚠️ Conversation state too large, truncating...")
+                # Keep essential fields
+                essential_fields = ['user_id', 'origin', 'destination', 'dates', 'passengers', 'trip_type', 'language', 'response_mode', 'search_stale', 'last_updated']
+                truncated_state = {k: v for k, v in safe_state.items() if k in essential_fields}
+                safe_state = truncated_state
+            
+            self.table.put_item(Item={
+                'user_id': self.user_id,
+                'sort_key': 'conversation_state',
+                'data_type': 'conversation_state',
+                'timestamp': timestamp.isoformat(),
+                'state_data': safe_state,
+                'ttl': int((timestamp + timedelta(hours=24)).timestamp())
+            })
+            
+            self._update_last_activity()
+            
+        except Exception as e:
+            print(f"❌ Error setting conversation state in DynamoDB: {e}")
+
+    def get_conversation_state(self) -> Dict:
+        """Get the current unified conversation state"""
+        try:
+            response = self.table.get_item(
+                Key={
+                    'user_id': self.user_id,
+                    'sort_key': 'conversation_state'
+                }
+            )
+            
+            if 'Item' in response:
+                state_data = response['Item'].get('state_data', {})
+                # Ensure required fields exist with defaults
+                default_state = {
+                    'user_id': self.user_id,
+                    'user_message': '',
+                    'conversation_history': [],
+                    'origin': None,
+                    'destination': None,
+                    'dates': {},
+                    'passengers': None,
+                    'trip_type': None,
+                    'language': 'en-US',
+                    'response_mode': 'text',
+                    'search_stale': False,
+                    'missing_slots': [],
+                    'search_payload': None,
+                    'flight_results': None,
+                    'last_updated': None
+                }
+                return {**default_state, **state_data}
+            
+            # Return default state for new conversations
+            return {
+                'user_id': self.user_id,
+                'user_message': '',
+                'conversation_history': [],
+                'origin': None,
+                'destination': None,
+                'dates': {},
+                'passengers': None,
+                'trip_type': None,
+                'language': 'en-US',
+                'response_mode': 'text',
+                'search_stale': False,
+                'missing_slots': [],
+                'search_payload': None,
+                'flight_results': None,
+                'last_updated': None
+            }
+            
+        except Exception as e:
+            print(f"⚠️ Error getting conversation state from DynamoDB: {e}")
+            return {
+                'user_id': self.user_id,
+                'user_message': '',
+                'conversation_history': [],
+                'origin': None,
+                'destination': None,
+                'dates': {},
+                'passengers': None,
+                'trip_type': None,
+                'language': 'en-US',
+                'response_mode': 'text',
+                'search_stale': False,
+                'missing_slots': [],
+                'search_payload': None,
+                'flight_results': None,
+                'last_updated': None
+            }
+
+    def update_conversation_state(self, updates: Dict):
+        """Update specific fields in the conversation state"""
+        try:
+            current_state = self.get_conversation_state()
+            
+            # Apply updates
+            for key, value in updates.items():
+                if key == 'dates' and isinstance(value, dict) and isinstance(current_state.get('dates'), dict):
+                    # Merge date updates
+                    current_state['dates'].update(value)
+                elif key == 'conversation_history' and isinstance(value, list):
+                    # Append to conversation history, keeping last 10 exchanges
+                    current_history = current_state.get('conversation_history', [])
+                    current_history.extend(value)
+                    current_state['conversation_history'] = current_history[-10:]
+                else:
+                    current_state[key] = value
+            
+            # Set timestamp
+            current_state['last_updated'] = datetime.now().isoformat()
+            
+            # Save updated state
+            self.set_conversation_state(current_state)
+            
+        except Exception as e:
+            print(f"❌ Error updating conversation state: {e}")
+
+    def clear_conversation_state(self):
+        """Clear the conversation state"""
+        try:
+            self.table.delete_item(
+                Key={
+                    'user_id': self.user_id,
+                    'sort_key': 'conversation_state'
+                }
+            )
+            
+            self._update_last_activity()
+            
+        except Exception as e:
+            print(f"⚠️ Error clearing conversation state in DynamoDB: {e}")
+
+    def has_active_conversation(self) -> bool:
+        """Check if there's an active conversation with some filled slots"""
+        try:
+            state = self.get_conversation_state()
+            
+            # Check if any required slots are filled
+            has_origin = bool(state.get('origin'))
+            has_destination = bool(state.get('destination'))
+            has_dates = bool(state.get('dates', {}).get('depart'))
+            has_passengers = bool(state.get('passengers'))
+            has_trip_type = bool(state.get('trip_type'))
+            
+            # Also check if conversation is recent (within 1 hour)
+            last_updated = state.get('last_updated')
+            if last_updated:
+                try:
+                    last_update_time = datetime.fromisoformat(last_updated)
+                    is_recent = datetime.now() - last_update_time < timedelta(hours=1)
+                except:
+                    is_recent = False
+            else:
+                is_recent = False
+            
+            return (has_origin or has_destination or has_dates or has_passengers or has_trip_type) and is_recent
+            
+        except Exception:
+            return False
+
+    def get_known_info_summary(self) -> str:
+        """Get a summary of known information to avoid re-asking"""
+        try:
+            state = self.get_conversation_state()
+            
+            summary_parts = []
+            
+            if state.get('origin'):
+                summary_parts.append(f"Origin: {state['origin']}")
+                
+            if state.get('destination'):
+                summary_parts.append(f"Destination: {state['destination']}")
+                
+            if state.get('dates', {}).get('depart'):
+                dates_info = f"Departure: {state['dates']['depart']}"
+                if state.get('dates', {}).get('return'):
+                    dates_info += f", Return: {state['dates']['return']}"
+                summary_parts.append(dates_info)
+                
+            if state.get('passengers'):
+                summary_parts.append(f"Passengers: {state['passengers']}")
+                
+            if state.get('trip_type'):
+                summary_parts.append(f"Trip type: {state['trip_type']}")
+            
+            return "; ".join(summary_parts) if summary_parts else "No previous information"
+            
+        except Exception:
+            return "No previous information"
 
 
 class DynamoDBMemoryManager:
