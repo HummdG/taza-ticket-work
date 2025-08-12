@@ -37,7 +37,7 @@ def should_use_unified_agent(user_message: str, user_id: str) -> bool:
     Use unified agent for flight booking requests and active conversations
     """
     # Check if there's an active conversation with filled slots
-    memory = memory_manager.get_memory(user_id)
+    memory = memory_manager.get_user_memory(user_id)
     has_active = memory.has_active_conversation()
     
     # Check if this message is flight-related
@@ -71,7 +71,7 @@ async def process_unified_message(
             response_mode = "text"
         
         # Get memory and current conversation state
-        memory = memory_manager.get_memory(user_id)
+        memory = memory_manager.get_user_memory(user_id)
         current_state = memory.get_conversation_state()
         
         # Add conversation history
