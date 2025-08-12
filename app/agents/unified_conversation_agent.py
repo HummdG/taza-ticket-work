@@ -316,7 +316,7 @@ def parse_date_natural(date_str: str, context_date: datetime = None) -> Optional
     """
     
     try:
-        response = llm.invoke([HumanMessage(content=date_prompt)])
+        response = main_llm.invoke([HumanMessage(content=date_prompt)])
         result = response.content.strip()
         
         if result == "INVALID" or not re.match(r'^\d{4}-\d{2}-\d{2}$', result):
