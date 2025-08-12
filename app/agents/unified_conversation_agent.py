@@ -17,7 +17,11 @@ except ImportError:
     LANGDETECT_AVAILABLE = False
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.output_parsers import JsonOutputParser
+from langchain.chains import LLMChain
+from langchain.schema import BaseOutputParser
 
 from ..models.schemas import ConversationState, ConversationResponse
 from ..payloads.flight_search import (
@@ -28,8 +32,82 @@ from ..payloads.flight_search import (
 
 
 
-# Initialize LLM
-llm = ChatOpenAI(model="gpt-4o", temperature=0)
+# Initialize LLMs with chaining
+main_llm = ChatOpenAI(model="gpt-4o", temperature=0)
+reformulation_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+# Query Reformulation Chain
+reformulation_prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are a query reformulation expert for flight booking conversations. 
+    Your job is to extract ONLY the essential flight booking information from user messages and conversation history.
+    
+    Remove noise, filler words, repetition, and non-flight-related content.
+    Keep only: locations, dates, passenger count, trip type preferences, and direct flight requests.
+    
+    Input: Raw user message + conversation history
+    Output: Clean, essential information only
+    
+    Examples:
+    Input: "Um, well, I was thinking, you know, maybe I want to go from London to Paris next Friday for like 2 people"
+    Output: "London to Paris next Friday, 2 passengers"
+    
+    Input: "Hello how are you? By the way I need flights from Lahore to Dubai on September 6th"  
+    Output: "Lahore to Dubai September 6th"
+    
+    Return only the reformulated query, nothing else."""),
+    ("human", "User message: {user_message}\nConversation history: {history}\n\nReformulated query:")
+])
+
+reformulation_chain = reformulation_prompt | reformulation_llm
+
+# Flight Information Extraction Chain
+extraction_prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are a flight information extraction expert. Extract flight booking details from user messages.
+    
+    CRITICAL: Return ONLY valid JSON with the exact structure below. No explanations, no markdown formatting.
+    
+    Available trip types: "one_way", "return", "multi_city"
+    Use metro-area IATA codes when possible (LON, NYC, PAR) unless user specifies exact airport.
+    
+    JSON structure:
+    {{
+        "origin_mentioned": "place name or null",
+        "destination_mentioned": "place name or null", 
+        "departure_date_mentioned": "natural date expression or null",
+        "return_date_mentioned": "natural date expression or null",
+        "passengers_mentioned": number or null,
+        "trip_type_mentioned": "one_way|return|multi_city or null",
+        "clarification_needed": ["list of ambiguous items or empty array"]
+    }}"""),
+    ("human", "Extract flight information from: {message}")
+])
+
+extraction_chain = extraction_prompt | main_llm | JsonOutputParser()
+
+# Conversation Flow Chain  
+conversation_prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are TazaTicket's flight booking assistant. You help users find and book flights.
+
+    Current conversation state: {state_summary}
+    User's language: {language}
+    Response mode: {response_mode}
+
+    RULES:
+    1. Always respond in the user's detected language
+    2. Be concise and natural - perfect for {response_mode} mode
+    3. Never re-ask for information you already have
+    4. When all required info is complete, confirm before searching
+    5. Guide users step by step through missing information
+
+    Required for flight search: origin, destination, departure date, passengers, trip type
+    
+    Response should be helpful, friendly, and focused on getting flight details."""),
+    MessagesPlaceholder("conversation_history"),
+    ("human", "{user_message}"),
+    ("human", "Action needed: {action}\nMissing info: {missing_slots}\nGenerate natural response:")
+])
+
+conversation_chain = conversation_prompt | main_llm
 
 # Metro-area IATA codes for broad searches
 METRO_AREA_CODES = {
@@ -292,125 +370,111 @@ def _simple_flight_extraction(user_message: str) -> Dict[str, Any]:
     return {"clarification_needed": ["Could not understand the request"]}
 
 
-def extract_flight_info(user_message: str, current_state: Dict[str, Any]) -> Dict[str, Any]:
+def extract_flight_info_with_chains(user_message: str, current_state: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Extract flight information from user message using LLM
-    Updates only the slots that are mentioned or changed
+    Extract flight information using LangChain with query reformulation
     """
-    
-    extraction_prompt = f"""
-    Extract flight booking information from this user message: "{user_message}"
-    
-    Current conversation state:
-    - Origin: {current_state.get('origin', 'Not set')}
-    - Destination: {current_state.get('destination', 'Not set')}
-    - Dates: {current_state.get('dates', 'Not set')}
-    - Passengers: {current_state.get('passengers', 'Not set')}
-    - Trip type: {current_state.get('trip_type', 'Not set')}
-    
-    ONLY extract information that is explicitly mentioned or being changed in this message.
-    DO NOT fill in information that isn't clearly stated.
-    
-    For cities/airports:
-    - Extract the actual place names (e.g., "London", "New York", "Heathrow")
-    - Do not convert to IATA codes yet
-    - If user specifies a specific airport, note that
-    
-    For dates:
-    - Extract natural date expressions as-is
-    - Note if it's for departure, return, or both
-    
-    For trip type:
-    - "one_way" for one-way trips
-    - "return" for round trips
-    - "multi_city" for complex itineraries
-    
-    Return ONLY a JSON object with fields that were mentioned:
-    {{
-        "origin_mentioned": "place name or null",
-        "destination_mentioned": "place name or null",
-        "departure_date_mentioned": "natural date expression or null",
-        "return_date_mentioned": "natural date expression or null",
-        "passengers_mentioned": number or null,
-        "trip_type_mentioned": "one_way|return|multi_city or null",
-        "clarification_needed": ["list of ambiguous items that need clarification"]
-    }}
-    """
-    
     try:
-        response = llm.invoke([HumanMessage(content=extraction_prompt)])
-        content = response.content.strip()
+        # Step 1: Reformulate query to remove noise
+        history_summary = _format_conversation_history(current_state.get('conversation_history', []))
         
-        print(f"🤖 LLM Response for flight extraction: {content}")
+        print(f"🔄 Reformulating query: {user_message}")
+        reformulated = reformulation_chain.invoke({
+            "user_message": user_message,
+            "history": history_summary
+        })
         
-        # Clean JSON formatting
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.endswith("```"):
-            content = content[:-3]
-        content = content.strip()
+        reformulated_content = reformulated.content.strip() if hasattr(reformulated, 'content') else str(reformulated)
+        print(f"✨ Reformulated: {reformulated_content}")
         
-        if not content:
-            print("⚠️ Empty response from LLM")
-            return {"clarification_needed": ["Could not understand the request"]}
+        # Step 2: Extract flight information from clean query
+        print(f"🎯 Extracting flight info from reformulated query")
+        extracted = extraction_chain.invoke({"message": reformulated_content})
         
-        return json.loads(content)
+        print(f"📊 Extracted: {extracted}")
+        return extracted
         
-    except json.JSONDecodeError as e:
-        print(f"❌ JSON parsing error: {e}")
-        print(f"📝 Raw content: '{content}'")
-        # Fallback to simple extraction
-        return _simple_flight_extraction(user_message)
     except Exception as e:
-        print(f"❌ Error extracting flight info: {e}")
+        print(f"❌ Error in chain-based extraction: {e}")
         print("🔄 Falling back to simple extraction")
         return _simple_flight_extraction(user_message)
 
 
-def build_response(
+def _format_conversation_history(history: List[Dict]) -> str:
+    """Format conversation history for reformulation context"""
+    if not history:
+        return "No previous conversation"
+    
+    recent_history = history[-3:]  # Keep last 3 exchanges
+    formatted = []
+    
+    for exchange in recent_history:
+        role = exchange.get('role', 'unknown')
+        content = exchange.get('content', '')
+        if role == 'user':
+            formatted.append(f"User: {content}")
+        elif role == 'assistant':
+            formatted.append(f"Assistant: {content}")
+    
+    return " | ".join(formatted)
+
+
+def extract_flight_info(user_message: str, current_state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract flight information - now using enhanced chains
+    """
+    return extract_flight_info_with_chains(user_message, current_state)
+
+
+def build_response_with_chain(
     action: str,
     language: str,
     response_mode: str,
     state_update: Dict[str, Any],
+    conversation_history: List[Dict] = None,
+    user_message: str = "",
     missing_slots: List[str] = None,
     search_payload: Dict[str, Any] = None,
     notes: str = None
 ) -> ConversationResponse:
-    """Build natural language response based on action and state"""
+    """Build natural language response using conversation chain"""
     
     if missing_slots is None:
         missing_slots = []
+    if conversation_history is None:
+        conversation_history = []
     
-    # Generate natural utterance based on action
-    utterance_prompts = {
-        "ASK_MISSING": f"Politely ask for missing flight information: {', '.join(missing_slots)}. Be conversational and helpful.",
-        "SEARCH": "Confirm that you're searching for flights with the provided details.",
-        "CONFIRM_TRIP": "Ask the user to confirm their flight details before searching.",
-        "CLARIFY": "Ask for clarification about ambiguous information in a friendly way.",
-        "SMALL_TALK": "Respond to general conversation in a helpful, friendly manner.",
-        "OTHER": "Provide a helpful response to the user's request."
-    }
+    # Format conversation history for chain
+    formatted_history = []
+    for exchange in conversation_history[-4:]:  # Keep last 4 exchanges
+        role = exchange.get('role', 'user')
+        content = exchange.get('content', '')
+        if role == 'user':
+            formatted_history.append(HumanMessage(content=content))
+        else:
+            formatted_history.append(AIMessage(content=content))
     
-    utterance_prompt = f"""
-    Generate a natural, conversational response in {language}.
-    Action: {action}
-    Context: {utterance_prompts.get(action, 'Respond helpfully')}
-    State update: {state_update}
-    Notes: {notes or 'None'}
-    
-    Make the response:
-    - Natural and conversational
-    - Appropriate for {'speech' if response_mode == 'speech' else 'text'} mode
-    - Concise but friendly
-    - In the detected language ({language})
-    
-    Return only the response text, no explanations.
-    """
+    # Create state summary
+    state_summary = _create_state_summary(state_update)
     
     try:
-        response = llm.invoke([HumanMessage(content=utterance_prompt)])
-        utterance = response.content.strip()
-    except:
+        # Use conversation chain for natural response
+        print(f"🗣️ Generating response with conversation chain")
+        response = conversation_chain.invoke({
+            "conversation_history": formatted_history,
+            "user_message": user_message,
+            "action": action,
+            "missing_slots": missing_slots,
+            "state_summary": state_summary,
+            "language": language,
+            "response_mode": response_mode
+        })
+        
+        utterance = response.content.strip() if hasattr(response, 'content') else str(response)
+        print(f"💬 Generated response: {utterance}")
+        
+    except Exception as e:
+        print(f"❌ Error in conversation chain: {e}")
         # Fallback responses
         fallbacks = {
             "ASK_MISSING": f"I need a bit more information. Could you please provide: {', '.join(missing_slots)}?",
@@ -429,6 +493,50 @@ def build_response(
         missing_slots=missing_slots,
         state_update=state_update,
         utterance=utterance,
+        search_payload=search_payload,
+        notes=notes
+    )
+
+
+def _create_state_summary(state: Dict[str, Any]) -> str:
+    """Create a readable summary of current conversation state"""
+    summary_parts = []
+    
+    if state.get('origin'):
+        summary_parts.append(f"From: {state['origin']}")
+    if state.get('destination'):
+        summary_parts.append(f"To: {state['destination']}")
+    if state.get('dates', {}).get('depart'):
+        summary_parts.append(f"Departure: {state['dates']['depart']}")
+    if state.get('dates', {}).get('return'):
+        summary_parts.append(f"Return: {state['dates']['return']}")
+    if state.get('passengers'):
+        summary_parts.append(f"Passengers: {state['passengers']}")
+    if state.get('trip_type'):
+        summary_parts.append(f"Type: {state['trip_type']}")
+    
+    return " | ".join(summary_parts) if summary_parts else "No flight details yet"
+
+
+def build_response(
+    action: str,
+    language: str,
+    response_mode: str,
+    state_update: Dict[str, Any],
+    missing_slots: List[str] = None,
+    search_payload: Dict[str, Any] = None,
+    notes: str = None
+) -> ConversationResponse:
+    """Legacy build_response function - redirects to chain-based version"""
+    
+    return build_response_with_chain(
+        action=action,
+        language=language,
+        response_mode=response_mode,
+        state_update=state_update,
+        conversation_history=[],
+        user_message="",
+        missing_slots=missing_slots,
         search_payload=search_payload,
         notes=notes
     )
@@ -470,11 +578,13 @@ def process_conversation_turn(
                 state_update["origin"] = origin_iata
                 any_slot_changed = True
         else:
-            return build_response(
+            return build_response_with_chain(
                 action="CLARIFY",
                 language=detected_language,
                 response_mode=user_mode,
                 state_update=state_update,
+                conversation_history=current_state.get('conversation_history', []),
+                user_message=user_message,
                 notes=f"Unknown city/airport: {extracted_info['origin_mentioned']}"
             )
     
@@ -486,11 +596,13 @@ def process_conversation_turn(
                 state_update["destination"] = dest_iata
                 any_slot_changed = True
         else:
-            return build_response(
+            return build_response_with_chain(
                 action="CLARIFY",
                 language=detected_language,
                 response_mode=user_mode,
                 state_update=state_update,
+                conversation_history=current_state.get('conversation_history', []),
+                user_message=user_message,
                 notes=f"Unknown city/airport: {extracted_info['destination_mentioned']}"
             )
     
@@ -505,11 +617,13 @@ def process_conversation_turn(
                 new_dates["depart"] = depart_date
                 any_slot_changed = True
         else:
-            return build_response(
+            return build_response_with_chain(
                 action="CLARIFY",
                 language=detected_language,
                 response_mode=user_mode,
                 state_update=state_update,
+                conversation_history=current_state.get('conversation_history', []),
+                user_message=user_message,
                 notes="Could not understand the date"
             )
     
@@ -520,11 +634,13 @@ def process_conversation_turn(
                 new_dates["return"] = return_date
                 any_slot_changed = True
         else:
-            return build_response(
+            return build_response_with_chain(
                 action="CLARIFY",
                 language=detected_language,
                 response_mode=user_mode,
                 state_update=state_update,
+                conversation_history=current_state.get('conversation_history', []),
+                user_message=user_message,
                 notes="Could not understand the return date"
             )
     
@@ -559,11 +675,13 @@ def process_conversation_turn(
         
         is_valid, error_msg = validate_dates(depart, return_date)
         if not is_valid:
-            return build_response(
+            return build_response_with_chain(
                 action="CLARIFY",
                 language=detected_language,
                 response_mode=user_mode,
                 state_update=state_update,
+                conversation_history=current_state.get('conversation_history', []),
+                user_message=user_message,
                 notes=error_msg
             )
     
@@ -580,11 +698,13 @@ def process_conversation_turn(
     
     # Action selection logic
     if missing_slots:
-        return build_response(
+        return build_response_with_chain(
             action="ASK_MISSING",
             language=detected_language,
             response_mode=user_mode,
             state_update=state_update,
+            conversation_history=current_state.get('conversation_history', []),
+            user_message=user_message,
             missing_slots=missing_slots
         )
     
@@ -622,20 +742,24 @@ def process_conversation_turn(
         
         state_update["search_payload"] = search_payload
         
-        return build_response(
+        return build_response_with_chain(
             action="SEARCH",
             language=detected_language,
             response_mode=user_mode,
             state_update=state_update,
+            conversation_history=updated_state.get('conversation_history', []),
+            user_message=user_message,
             search_payload=search_payload,
             notes="All required information collected"
         )
         
     except Exception as e:
-        return build_response(
+        return build_response_with_chain(
             action="CLARIFY",
             language=detected_language,
             response_mode=user_mode,
             state_update=state_update,
+            conversation_history=current_state.get('conversation_history', []),
+            user_message=user_message,
             notes=f"Error building search: {str(e)}"
         ) 
