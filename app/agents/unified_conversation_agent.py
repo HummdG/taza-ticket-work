@@ -29,7 +29,7 @@ from ..payloads.flight_search import (
 
 
 # Initialize LLM
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0)
+llm = ChatOpenAI(model="gpt-4o", temperature=0)
 
 # Metro-area IATA codes for broad searches
 METRO_AREA_CODES = {
@@ -246,6 +246,52 @@ def validate_dates(depart_date: str, return_date: Optional[str] = None) -> Tuple
         return False, "Invalid date format. Please use a valid date."
 
 
+def _simple_flight_extraction(user_message: str) -> Dict[str, Any]:
+    """
+    Simple fallback extraction when LLM fails
+    Uses basic pattern matching for common flight terms
+    """
+    import re
+    
+    message_lower = user_message.lower()
+    
+    # Check for flight keywords in multiple languages
+    flight_keywords = ['flight', 'fly', 'ticket', 'travel', 'trip', 'لاہور', 'دبئی', 'lahore', 'dubai', 'جانا', 'سفر']
+    has_flight_intent = any(keyword in message_lower for keyword in flight_keywords)
+    
+    if has_flight_intent:
+        # Try to extract cities using the IATA mapping
+        origin_mentioned = None
+        destination_mentioned = None
+        
+        # Check for known cities
+        for city, code in METRO_AREA_CODES.items():
+            if city in message_lower:
+                if not origin_mentioned:
+                    origin_mentioned = city
+                elif city != origin_mentioned:
+                    destination_mentioned = city
+        
+        for airport, code in AIRPORT_CODES.items():
+            if airport in message_lower:
+                if not origin_mentioned:
+                    origin_mentioned = airport
+                elif airport != origin_mentioned:
+                    destination_mentioned = airport
+        
+        return {
+            "origin_mentioned": origin_mentioned,
+            "destination_mentioned": destination_mentioned,
+            "departure_date_mentioned": None,  # Too complex for simple extraction
+            "return_date_mentioned": None,
+            "passengers_mentioned": None,
+            "trip_type_mentioned": None,
+            "clarification_needed": []
+        }
+    
+    return {"clarification_needed": ["Could not understand the request"]}
+
+
 def extract_flight_info(user_message: str, current_state: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extract flight information from user message using LLM
@@ -295,6 +341,8 @@ def extract_flight_info(user_message: str, current_state: Dict[str, Any]) -> Dic
         response = llm.invoke([HumanMessage(content=extraction_prompt)])
         content = response.content.strip()
         
+        print(f"🤖 LLM Response for flight extraction: {content}")
+        
         # Clean JSON formatting
         if content.startswith("```json"):
             content = content[7:]
@@ -302,11 +350,21 @@ def extract_flight_info(user_message: str, current_state: Dict[str, Any]) -> Dic
             content = content[:-3]
         content = content.strip()
         
+        if not content:
+            print("⚠️ Empty response from LLM")
+            return {"clarification_needed": ["Could not understand the request"]}
+        
         return json.loads(content)
         
+    except json.JSONDecodeError as e:
+        print(f"❌ JSON parsing error: {e}")
+        print(f"📝 Raw content: '{content}'")
+        # Fallback to simple extraction
+        return _simple_flight_extraction(user_message)
     except Exception as e:
         print(f"❌ Error extracting flight info: {e}")
-        return {"clarification_needed": ["Could not understand the request"]}
+        print("🔄 Falling back to simple extraction")
+        return _simple_flight_extraction(user_message)
 
 
 def build_response(
