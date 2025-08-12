@@ -18,10 +18,14 @@ except ImportError:
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+
+# LangChain imports for enhanced chaining and memory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import JsonOutputParser
-from langchain.chains import LLMChain
+from langchain.chains import LLMChain, ConversationChain
 from langchain.schema import BaseOutputParser
+from langchain.memory import ConversationBufferMemory
+from langchain.memory.chat_message_histories import ChatMessageHistory
 
 from ..models.schemas import ConversationState, ConversationResponse
 from ..payloads.flight_search import (
@@ -35,6 +39,23 @@ from ..payloads.flight_search import (
 # Initialize LLMs with chaining
 main_llm = ChatOpenAI(model="gpt-4o", temperature=0)
 reformulation_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+# Initialize conversation memory for each user
+user_memories = {}
+
+def get_conversation_memory(user_id: str) -> ConversationBufferMemory:
+    """Get or create conversation buffer memory for a user"""
+    if user_id not in user_memories:
+        memory = ConversationBufferMemory(
+            memory_key="chat_history",
+            return_messages=True,
+            max_token_limit=2000,  # Limit memory size to prevent token overflow
+            human_prefix="User",
+            ai_prefix="Assistant"
+        )
+        user_memories[user_id] = memory
+        print(f"🧠 Created new conversation memory for user: {user_id}")
+    return user_memories[user_id]
 
 # Query Reformulation Chain
 reformulation_prompt = ChatPromptTemplate.from_messages([
@@ -55,10 +76,9 @@ reformulation_prompt = ChatPromptTemplate.from_messages([
     Output: "Lahore to Dubai September 6th"
     
     Return only the reformulated query, nothing else."""),
-    ("human", "User message: {user_message}\nConversation history: {history}\n\nReformulated query:")
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("human", "User message: {user_message}\n\nReformulated query:")
 ])
-
-reformulation_chain = reformulation_prompt | reformulation_llm
 
 # Flight Information Extraction Chain
 extraction_prompt = ChatPromptTemplate.from_messages([
@@ -84,7 +104,7 @@ extraction_prompt = ChatPromptTemplate.from_messages([
 
 extraction_chain = extraction_prompt | main_llm | JsonOutputParser()
 
-# Conversation Flow Chain  
+# Main Conversation Chain with Memory
 conversation_prompt = ChatPromptTemplate.from_messages([
     ("system", """You are TazaTicket's flight booking assistant. You help users find and book flights.
 
@@ -95,19 +115,31 @@ conversation_prompt = ChatPromptTemplate.from_messages([
     RULES:
     1. Always respond in the user's detected language
     2. Be concise and natural - perfect for {response_mode} mode
-    3. Never re-ask for information you already have
+    3. Never re-ask for information you already have in the conversation history
     4. When all required info is complete, confirm before searching
     5. Guide users step by step through missing information
+    6. Reference previous conversation context naturally
 
     Required for flight search: origin, destination, departure date, passengers, trip type
     
+    Action needed: {action}
+    Missing info: {missing_slots}
+    
     Response should be helpful, friendly, and focused on getting flight details."""),
-    MessagesPlaceholder("conversation_history"),
-    ("human", "{user_message}"),
-    ("human", "Action needed: {action}\nMissing info: {missing_slots}\nGenerate natural response:")
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("human", "{user_message}")
 ])
 
-conversation_chain = conversation_prompt | main_llm
+def create_conversation_chain(user_id: str) -> ConversationChain:
+    """Create a conversation chain with memory for a specific user"""
+    memory = get_conversation_memory(user_id)
+    
+    return ConversationChain(
+        llm=main_llm,
+        prompt=conversation_prompt,
+        memory=memory,
+        verbose=False
+    )
 
 # Metro-area IATA codes for broad searches
 METRO_AREA_CODES = {
@@ -372,19 +404,24 @@ def _simple_flight_extraction(user_message: str) -> Dict[str, Any]:
 
 def extract_flight_info_with_chains(user_message: str, current_state: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Extract flight information using LangChain with query reformulation
+    Extract flight information using LangChain with query reformulation and conversation memory
     """
     try:
-        # Step 1: Reformulate query to remove noise
-        history_summary = _format_conversation_history(current_state.get('conversation_history', []))
+        user_id = current_state.get('user_id', 'unknown')
+        memory = get_conversation_memory(user_id)
         
-        print(f"🔄 Reformulating query: {user_message}")
-        reformulated = reformulation_chain.invoke({
-            "user_message": user_message,
-            "history": history_summary
-        })
+        # Step 1: Reformulate query to remove noise using conversation memory
+        print(f"🔄 Reformulating query with conversation memory: {user_message}")
         
-        reformulated_content = reformulated.content.strip() if hasattr(reformulated, 'content') else str(reformulated)
+        reformulation_chain = LLMChain(
+            llm=reformulation_llm,
+            prompt=reformulation_prompt,
+            memory=memory,
+            verbose=False
+        )
+        
+        reformulated_response = reformulation_chain.predict(user_message=user_message)
+        reformulated_content = reformulated_response.strip()
         print(f"✨ Reformulated: {reformulated_content}")
         
         # Step 2: Extract flight information from clean query
@@ -437,40 +474,43 @@ def build_response_with_chain(
     search_payload: Dict[str, Any] = None,
     notes: str = None
 ) -> ConversationResponse:
-    """Build natural language response using conversation chain"""
+    """Build natural language response using conversation chain with buffer memory"""
     
     if missing_slots is None:
         missing_slots = []
-    if conversation_history is None:
-        conversation_history = []
     
-    # Format conversation history for chain
-    formatted_history = []
-    for exchange in conversation_history[-4:]:  # Keep last 4 exchanges
-        role = exchange.get('role', 'user')
-        content = exchange.get('content', '')
-        if role == 'user':
-            formatted_history.append(HumanMessage(content=content))
-        else:
-            formatted_history.append(AIMessage(content=content))
-    
-    # Create state summary
-    state_summary = _create_state_summary(state_update)
+    user_id = state_update.get('user_id', 'unknown')
     
     try:
-        # Use conversation chain for natural response
-        print(f"🗣️ Generating response with conversation chain")
-        response = conversation_chain.invoke({
-            "conversation_history": formatted_history,
+        # Create conversation chain with memory for this user
+        chain = create_conversation_chain(user_id)
+        
+        # Create state summary
+        state_summary = _create_state_summary(state_update)
+        
+        # Prepare input for chain
+        chain_input = {
             "user_message": user_message,
             "action": action,
             "missing_slots": missing_slots,
             "state_summary": state_summary,
             "language": language,
             "response_mode": response_mode
-        })
+        }
         
-        utterance = response.content.strip() if hasattr(response, 'content') else str(response)
+        print(f"🗣️ Generating response with conversation chain and memory")
+        
+        # Use the conversation chain with memory
+        response = chain.predict(
+            user_message=user_message,
+            action=action,
+            missing_slots=", ".join(missing_slots) if missing_slots else "None",
+            state_summary=state_summary,
+            language=language,
+            response_mode=response_mode
+        )
+        
+        utterance = response.strip()
         print(f"💬 Generated response: {utterance}")
         
     except Exception as e:
