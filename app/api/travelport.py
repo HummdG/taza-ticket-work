@@ -4,7 +4,7 @@ Travelport API authentication and header management
 
 import os
 import requests
-from typing import Dict
+from typing import Dict, Any, Optional
 
 
 # Travelport API Configuration
@@ -70,4 +70,28 @@ def get_api_headers() -> Dict[str, str]:
         "XAUTH_TRAVELPORT_ACCESSGROUP": ACCESS_GROUP,
         "Accept-Version": "11",
         "Content-Version": "11",
-    } 
+    }
+
+
+def search_flights(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Execute flight search with Travelport API using provided payload
+    
+    Args:
+        payload: Complete flight search payload for Travelport API
+        
+    Returns:
+        Dict containing API response or None if error occurred
+        
+    Raises:
+        requests.HTTPError: If API call fails
+    """
+    try:
+        headers = get_api_headers()
+        response = requests.post(CATALOG_URL, headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()
+        
+    except Exception as e:
+        print(f"❌ Flight search API error: {e}")
+        return {"error": str(e), "status": "failed"} 
